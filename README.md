@@ -13,7 +13,7 @@ git clone https://github.com/xuxianbang1993/SkillGuard.git
 cd SkillGuard
 
 # 2. 一键配置 Hook（自动写入 ~/.claude/settings.json）
-bash 一键配置hook.sh
+bash 一键配置.sh
 
 # 安装完成后启动 Claude Code 即生效
 ```
