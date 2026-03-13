@@ -1,9 +1,24 @@
 # SkillGuard
 
-> **用途**：跨会话记忆文档 + 可执行操作规范
-> **创建时间**：2026-03-13
-> **最后更新**：2026-03-14 v5.1（修复审查后死循环 BUG：新增审查通过凭证机制）
-> **背景**：ClawHavoc 事件（2026年2月）后，针对 Claude Code 技能安装的完整安全框架
+> Claude Code 技能安装安全审查流水线 — 四层防御 + Hook 拦截 + 完整性验证
+>
+> **背景**：ClawHavoc 事件（2026年2月，1184+ 恶意技能包）后的防御方案
+> **版本**：v5.1 | **最后更新**：2026-03-14
+
+## 快速安装
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/xuxianbang1993/SkillGuard.git
+cd SkillGuard
+
+# 2. 一键配置 Hook（自动写入 ~/.claude/settings.json）
+bash 一键配置hook.sh
+
+# 安装完成后启动 Claude Code 即生效
+```
+
+> **安装原理**：脚本将 SkillGuard 的三个 PreToolUse Hook（Bash/Write/Edit）配置到 `~/.claude/settings.json`，不覆盖已有配置。安装任何非官方技能时将自动触发四层安全审查。
 
 ---
 
