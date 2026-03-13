@@ -17,7 +17,7 @@ APPROVED_DIR="$SCRIPT_DIR/.approved"
 mkdir -p "$APPROVED_DIR" 2>/dev/null || true
 
 # ── 凭证函数 ────────────────────────────────────────────────
-# 检查技能是否有有效的审查通过凭证（30 分钟时效）
+# 检查技能是否有有效的审查通过凭证（一次性：验证后立即删除）
 has_valid_approval() {
     local source="$1"
     # 用 SHA256 哈希作为文件名（避免特殊字符问题）
@@ -29,19 +29,22 @@ has_valid_approval() {
         return 1  # 无凭证
     fi
 
-    # 检查时效（30 分钟 = 1800 秒）
+    # 检查时效（5 分钟 = 300 秒，仅防止凭证被遗忘未使用的情况）
     local cert_time
     cert_time=$(cat "$cert_file" 2>/dev/null || echo "0")
     local now
     now=$(date +%s)
     local age=$((now - cert_time))
 
-    if [ $age -gt 1800 ]; then
+    if [ $age -gt 300 ]; then
         rm -f "$cert_file"  # 过期，删除
         return 1
     fi
 
-    return 0  # 有效
+    # 一次性凭证：验证有效后立即删除，下次安装必须重新审查
+    rm -f "$cert_file"
+
+    return 0  # 有效（已消费）
 }
 
 # 颁发审查通过凭证
@@ -52,7 +55,7 @@ grant_approval() {
     date +%s > "$APPROVED_DIR/$hash"
 }
 
-# 清理所有过期凭证（每次运行时顺带清理）
+# 清理所有过期凭证（每次运行时顺带清理，5分钟超时）
 cleanup_expired_approvals() {
     local now
     now=$(date +%s)
@@ -61,7 +64,7 @@ cleanup_expired_approvals() {
         local cert_time
         cert_time=$(cat "$cert" 2>/dev/null || echo "0")
         local age=$((now - cert_time))
-        if [ $age -gt 1800 ]; then
+        if [ $age -gt 300 ]; then
             rm -f "$cert"
         fi
     done
@@ -160,10 +163,10 @@ fi
 if has_valid_approval "$SKILL_SOURCE"; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║  ✅ 审查通过凭证有效，放行安装                             ║"
+    echo "║  ✅ 审查通过凭证有效，放行安装（一次性凭证已消费）            ║"
     echo "╠══════════════════════════════════════════════════════════╣"
     echo "║  来源：$SKILL_SOURCE"
-    echo "║  状态：已通过隔离审查，凭证有效（30 分钟时效内）              ║"
+    echo "║  状态：已通过隔离审查，凭证已使用并删除，再次安装需重新审查    ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo ""
     exit 0  # 放行原命令
@@ -194,8 +197,8 @@ case $AUDIT_EXIT in
         echo "║  ✅ 审查通过，已颁发安装凭证                               ║"
         echo "╠══════════════════════════════════════════════════════════╣"
         echo "║  来源：$SKILL_SOURCE"
-        echo "║  凭证有效期：30 分钟                                      ║"
-        echo "║  下次执行同一安装命令将自动放行                             ║"
+        echo "║  凭证类型：一次性（仅限本次安装放行）                       ║"
+        echo "║  下次安装同一技能将重新触发完整审查                          ║"
         echo "╠══════════════════════════════════════════════════════════╣"
         echo "║  请告知 Claude：「继续安装」以执行原始安装命令               ║"
         echo "╚══════════════════════════════════════════════════════════╝"

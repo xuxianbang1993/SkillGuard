@@ -3,7 +3,7 @@
 > Claude Code 技能安装安全审查流水线 — 四层防御 + Hook 拦截 + 完整性验证
 >
 > **背景**：ClawHavoc 事件（2026年2月，1184+ 恶意技能包）后的防御方案
-> **版本**：v5.1 | **最后更新**：2026-03-14
+> **版本**：v5.2 | **最后更新**：2026-03-14
 
 ## 快速安装
 
@@ -98,7 +98,7 @@ D. 持久化控制
 
 > **白名单机制**：`skillguard-gate.sh` 的 `is_trusted_source()` 使用 `case` 精确匹配**组织/仓库名**（非前缀匹配）。`anthropics/skills` 下所有技能（brainstorming、writing-plans 等）均自动放行，`anthropics/skills-evil` 则不匹配。
 >
-> **凭证机制**：非官方技能审查通过后，`skillguard-gate.sh` 在 `.approved/` 目录写入带时效凭证（30 分钟）。用户确认「继续安装」后 Claude 重新执行安装命令，凭证有效则自动放行，避免重复审查死循环。
+> **凭证机制**：非官方技能审查通过后，`skillguard-gate.sh` 在 `.approved/` 目录写入**一次性凭证**。用户确认「继续安装」后 Claude 重新执行安装命令，凭证验证通过后**立即删除**，确保每次安装都触发完整审查。
 
 ### 安装命令规范
 ```bash
@@ -200,12 +200,13 @@ npx clawhub@latest install <slug>
         │ 全部通过
         ▼
 ┌─────────────────────────────────────────────────────────┐
-│  审查通过 → 颁发凭证（.approved/ 目录，30 分钟时效）       │
+│  审查通过 → 颁发一次性凭证（.approved/ 目录）               │
 │  skillguard-gate.sh 写入 SHA256(source) → timestamp           │
 │                                                          │
 │  用户确认「继续安装」→ Claude 重新执行 npx 命令            │
-│  → skillguard-gate.sh 检测到有效凭证 → exit 0 放行             │
+│  → skillguard-gate.sh 检测到凭证 → 验证 → 立即删除 → exit 0   │
 │  → 原始安装命令正常执行 ✅                                │
+│  → 再次安装同一技能 → 必须重新走完整审查流程               │
 │                                                          │
 │  安装后自动验证：SHA256 基线校验                           │
 │  → 确认 CLAUDE.md / settings.json / hooks 未被篡改       │
@@ -358,7 +359,7 @@ sha256sum -c /tmp/skill-baseline.txt
 - **安装前必做 Layer 1**：Prompt Injection 语义扫描（24+ 检测项，含 Homoglyph/RAG投毒/多层编码）
 - **未知来源必做 Layer 2**：Docker 强化容器行为扫描（--network none --cap-drop ALL --no-new-privileges --pids-limit 100）
 - **ClawHub / 极低信任必做 Layer 3**：Docker Sandbox microVM 全自动动态测试（行为日志收集+分析）
-- **审查通过凭证**：非官方技能审查通过后颁发 30 分钟时效凭证，用户确认「继续安装」后 Claude 重新执行即自动放行（防死循环）
+- **审查通过凭证**：非官方技能审查通过后颁发一次性凭证，用户确认「继续安装」后 Claude 重新执行即放行，凭证使用后立即删除（每次安装必审查）
 - **Write/Edit 守卫**：SkillGuard Write (`skillguard-write.sh`) 拦截对 CLAUDE.md/settings.json/hooks/.bashrc 等敏感路径的写入
 - **SHA256 完整性验证**：安装前自动建立基线，安装后自动校验关键文件未被篡改
 - **CVE 版本预检**：自动检查 Docker/runc/Node.js 版本是否受已知 CVE 影响
@@ -411,10 +412,10 @@ sha256sum -c /tmp/skill-baseline.txt
 SkillGuard\
 ├── README.md                    ✅ 策略文档（本文件）v5.1
 ├── Dockerfile.skillguard     ✅ Layer 2 Docker 镜像定义
-├── skillguard-gate.sh                ✅ PreToolUse Hook — Bash 工具拦截器（含凭证机制）
+├── skillguard-gate.sh                ✅ PreToolUse Hook — Bash 工具拦截器（一次性凭证机制）
 ├── skillguard-write.sh               ✅ PreToolUse Hook — Write/Edit 工具守卫
 ├── skillguard-audit.sh               ✅ 扫描主控脚本 v5.0（Layer 0-3 + SHA256 + CVE预检）
-├── .approved\                   ✅ 审查通过凭证目录（自动管理，30 分钟时效）
+├── .approved\                   ✅ 审查通过凭证目录（一次性凭证，用后即删）
 ├── run-tests.sh                 ✅ 红队测试运行器（验证 Layer 1 检测能力）
 ├── test-fixtures\               ✅ 红队测试样本（10 个，覆盖所有检测项）
 │   ├── 01-clean-skill.md        ⬜ 干净样本（应通过）
@@ -464,11 +465,12 @@ SkillGuard\
 ```
 
 **审查通过后安装机制（v5.1 凭证放行）**：
-1. 审查通过 → `skillguard-gate.sh` 自动颁发凭证到 `.approved/` 目录（30 分钟时效）
+1. 审查通过 → `skillguard-gate.sh` 自动颁发**一次性凭证**到 `.approved/` 目录
 2. 用户告知 Claude「继续安装」→ Claude 重新执行原始 `npx` 安装命令
-3. `skillguard-gate.sh` 检测到有效凭证 → `exit 0` 放行 → 安装正常执行
-4. 安装后自动进行 SHA256 完整性校验
-5. 凭证 30 分钟后自动过期删除（每次 Hook 运行时清理）
+3. `skillguard-gate.sh` 检测到凭证 → 验证有效 → **立即删除凭证** → `exit 0` 放行
+4. 安装正常执行，安装后自动进行 SHA256 完整性校验
+5. 再次安装同一技能 → 凭证已删除 → **必须重新走完整审查流程**
+6. 未使用的凭证 5 分钟后自动过期清理（防遗忘）
 
 **安全保障**：
 - 凭证文件名用 `SHA256(source)` 哈希，不暴露技能来源
@@ -555,7 +557,7 @@ bash run-tests.sh                   # 验证 Layer 1 检测能力（10/10 应全
 ### 架构演进方向
 
 ```
-当前 v5.0（安全评分 ~9/10）
+当前 v5.2（安全评分 ~9/10）
     │
     ▼ Phase 4: LLM 检测层 + mcp-scan + PostToolUse Hook
     │  预期评分：9.2/10
