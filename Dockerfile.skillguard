@@ -1,0 +1,4 @@
+# Dockerfile.skillguard — SkillGuard Layer 2 扫描容器镜像
+FROM node:20-slim
+RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+WORKDIR /sandbox
