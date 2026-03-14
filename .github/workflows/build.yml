@@ -1,0 +1,60 @@
+## build.yml — SLSA Level 3 可复用构建工作流
+## 被 slsa-release.yml 调用，实现构建与签名的隔离（SLSA Level 3 要求）
+name: Reusable Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded artifact"
+        value: ${{ jobs.build.outputs.artifact-name }}
+      artifact-digest:
+        description: "SHA256 digest of the release archive"
+        value: ${{ jobs.build.outputs.artifact-digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.package.outputs.artifact-name }}
+      artifact-digest: ${{ steps.package.outputs.artifact-digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate checksums manifest
+        run: bash generate-checksums.sh
+
+      - name: Package release
+        id: package
+        run: |
+          ARCHIVE="skillguard-${{ inputs.version }}.tar.gz"
+          tar czf "$ARCHIVE" \
+            skillguard-gate.sh \
+            skillguard-audit.sh \
+            skillguard-write.sh \
+            generate-checksums.sh \
+            checksums.sha256 \
+            run-tests.sh \
+            Dockerfile.skillguard \
+            一键配置.sh \
+            test-fixtures/ \
+            LICENSE \
+            README.md
+          DIGEST=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)
+          echo "artifact-name=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "artifact-digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "## Release Package" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Archive**: $ARCHIVE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA256**: $DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive
+          path: skillguard-${{ inputs.version }}.tar.gz
+          retention-days: 5

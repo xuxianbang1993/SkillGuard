@@ -16,6 +16,7 @@ CORE_FILES=(
     "一键配置.sh"
     "run-tests.sh"
     "Dockerfile.skillguard"
+    "update.sh"
 )
 
 echo "=== SkillGuard 校验和生成 ==="

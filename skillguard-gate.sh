@@ -168,6 +168,65 @@ if ! verify_self_integrity; then
     exit 2
 fi
 
+# ── 会话级版本更新检查（每次会话只检查一次）─────────────────────
+# 利用临时文件标记，避免每个命令都检查
+UPDATE_CHECK_FLAG="/tmp/skillguard-update-checked-$(id -u 2>/dev/null || echo 0)"
+VERSION_FILE="$SCRIPT_DIR/VERSION"
+
+check_for_updates() {
+    # 已检查过则跳过
+    if [ -f "$UPDATE_CHECK_FLAG" ]; then
+        # 检查标记文件是否在 6 小时内（21600 秒）
+        local flag_time
+        flag_time=$(cat "$UPDATE_CHECK_FLAG" 2>/dev/null || echo "0")
+        local now
+        now=$(date +%s)
+        local age=$((now - flag_time))
+        if [ $age -lt 21600 ]; then
+            return 0  # 6 小时内已检查，跳过
+        fi
+    fi
+
+    # 写入标记（无论检查结果如何，本周期不再重复）
+    date +%s > "$UPDATE_CHECK_FLAG" 2>/dev/null || true
+
+    # 读取本地版本
+    local local_version="unknown"
+    if [ -f "$VERSION_FILE" ]; then
+        local_version=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+    fi
+
+    # 从 GitHub 获取最新版本（超时 3 秒，不阻塞正常使用）
+    if command -v curl &>/dev/null; then
+        local remote_version
+        remote_version=$(curl -sf --max-time 3 \
+            "https://raw.githubusercontent.com/xuxianbang1993/SkillGuard/main/VERSION" 2>/dev/null \
+            | tr -d '[:space:]')
+
+        if [ -n "$remote_version" ] && [ "$remote_version" != "$local_version" ]; then
+            # 有新版本，输出提示到 stderr（不干扰 hook 的 exit code 判断）
+            echo "" >&2
+            echo "┌─────────────────────────────────────────────────────────┐" >&2
+            echo "│  ⬆️  SkillGuard 新版本可用！                              │" >&2
+            echo "│                                                         │" >&2
+            echo "│  当前版本：v${local_version}                                      │" >&2
+            echo "│  最新版本：v${remote_version}                                      │" >&2
+            echo "│                                                         │" >&2
+            echo "│  更新命令：cd $(echo "$SCRIPT_DIR" | head -c 30) && bash update.sh  │" >&2
+            echo "│  查看更新内容：https://github.com/xuxianbang1993/SkillGuard/blob/main/CHANGELOG.md │" >&2
+            echo "└─────────────────────────────────────────────────────────┘" >&2
+            echo "" >&2
+        fi
+    fi
+}
+
+# 异步检查（不阻塞主流程，后台运行）
+check_for_updates &
+UPDATE_PID=$!
+# 等待最多 3 秒，超时则放弃
+( sleep 3 && kill $UPDATE_PID 2>/dev/null ) &
+wait $UPDATE_PID 2>/dev/null || true
+
 # ── 读取 Hook 输入（JSON from stdin）────────────────────────
 INPUT=$(cat)
 
