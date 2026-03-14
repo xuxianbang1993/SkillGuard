@@ -1,0 +1,14 @@
+# 个人笔记/会话记录（不公开）
+20260313-checkpoint.md
+20260314-记忆点.md
+memories.txt
+*.checkpoint.md
+
+# 红队测试样本（含攻击模式，不公开）
+test-fixtures/
+
+# 凭证目录
+.approved/
+
+# Claude Code 本地配置
+.claude/
