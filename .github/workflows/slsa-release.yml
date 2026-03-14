@@ -1,0 +1,62 @@
+name: SLSA Release
+
+# 每次推送 tag 时触发，生成 SLSA Level 3 出处证明
+# 使用 GitHub Artifact Attestations + Sigstore 签名
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write       # Sigstore OIDC 签名
+  contents: write        # 上传到 Release
+  attestations: write    # 生成出处证明
+
+jobs:
+  # Step 1: 在 reusable workflow 中构建（SLSA Level 3 要求）
+  build:
+    uses: ./.github/workflows/build-reusable.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  # Step 2: 生成 SLSA 出处证明 + 签名 + 发布
+  attest-and-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package
+
+      - name: Generate SLSA attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: '${{ needs.build.outputs.artifact-name }}'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ needs.build.outputs.artifact-name }}
+            checksums-release.sha256
+          body: |
+            ## SkillGuard ${{ github.ref_name }}
+
+            ### 验证方法
+
+            **SLSA 出处验证**（推荐）：
+            ```bash
+            gh attestation verify skillguard-${{ github.ref_name }}.tar.gz -o xuxianbang1993
+            ```
+
+            **SHA256 校验**：
+            ```bash
+            sha256sum -c checksums-release.sha256
+            ```
+
+            **预期哈希**：
+            ```
+            ${{ needs.build.outputs.artifact-hash }}  ${{ needs.build.outputs.artifact-name }}
+            ```

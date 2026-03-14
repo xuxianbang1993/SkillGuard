@@ -71,6 +71,103 @@ cleanup_expired_approvals() {
 }
 cleanup_expired_approvals 2>/dev/null || true
 
+# ── 自身完整性校验（Layer: Self-Integrity）─────────────────────
+# 每次 Hook 触发时，先校验自身和兄弟脚本的 SHA256
+# 如果被篡改则拒绝工作，防止攻击者通过修改审计脚本绕过检测
+INTEGRITY_MANIFEST="$SCRIPT_DIR/checksums.sha256"
+
+verify_self_integrity() {
+    # 优先：远程校验（从 GitHub 获取官方哈希）
+    if command -v curl &>/dev/null; then
+        local remote_checksums
+        remote_checksums=$(curl -sf --max-time 5 \
+            "https://raw.githubusercontent.com/xuxianbang1993/SkillGuard/main/checksums.sha256" 2>/dev/null)
+        if [ -n "$remote_checksums" ]; then
+            # 远程校验成功，逐行比对
+            local tampered=0
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                local expected_hash expected_file
+                expected_hash=$(echo "$line" | awk '{print $1}')
+                expected_file=$(echo "$line" | awk '{print $2}')
+                # 去掉前导 * 或 ./
+                expected_file="${expected_file#\*}"
+                expected_file="${expected_file#./}"
+                local local_file="$SCRIPT_DIR/$expected_file"
+                if [ -f "$local_file" ]; then
+                    local actual_hash
+                    actual_hash=$(sha256sum "$local_file" 2>/dev/null | cut -d' ' -f1)
+                    if [ "$actual_hash" != "$expected_hash" ]; then
+                        echo ""
+                        echo "╔══════════════════════════════════════════════════════════╗"
+                        echo "║  ⛔ SkillGuard 完整性校验失败（远程校验）                    ║"
+                        echo "╠══════════════════════════════════════════════════════════╣"
+                        echo "║  被篡改文件：$expected_file"
+                        echo "║  预期哈希：${expected_hash:0:16}..."
+                        echo "║  实际哈希：${actual_hash:0:16}..."
+                        echo "║                                                        ║"
+                        echo "║  SkillGuard 脚本已被修改，拒绝执行任何审计。                ║"
+                        echo "║  请从 GitHub 重新克隆：                                    ║"
+                        echo "║  git clone https://github.com/xuxianbang1993/SkillGuard  ║"
+                        echo "╚══════════════════════════════════════════════════════════╝"
+                        echo ""
+                        tampered=1
+                    fi
+                fi
+            done <<< "$remote_checksums"
+            if [ "$tampered" -eq 1 ]; then
+                return 1
+            fi
+            return 0  # 远程校验通过
+        fi
+    fi
+
+    # 降级：本地 Manifest 校验
+    if [ -f "$INTEGRITY_MANIFEST" ]; then
+        local tampered=0
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local expected_hash expected_file
+            expected_hash=$(echo "$line" | awk '{print $1}')
+            expected_file=$(echo "$line" | awk '{print $2}')
+            expected_file="${expected_file#\*}"
+            expected_file="${expected_file#./}"
+            local local_file="$SCRIPT_DIR/$expected_file"
+            if [ -f "$local_file" ]; then
+                local actual_hash
+                actual_hash=$(sha256sum "$local_file" 2>/dev/null | cut -d' ' -f1)
+                if [ "$actual_hash" != "$expected_hash" ]; then
+                    echo ""
+                    echo "╔══════════════════════════════════════════════════════════╗"
+                    echo "║  ⛔ SkillGuard 完整性校验失败（本地 Manifest）               ║"
+                    echo "╠══════════════════════════════════════════════════════════╣"
+                    echo "║  被篡改文件：$expected_file"
+                    echo "║  预期哈希：${expected_hash:0:16}..."
+                    echo "║  实际哈希：${actual_hash:0:16}..."
+                    echo "║                                                        ║"
+                    echo "║  SkillGuard 脚本已被修改，拒绝执行任何审计。                ║"
+                    echo "║  请从 GitHub 重新克隆或运行：bash generate-checksums.sh    ║"
+                    echo "╚══════════════════════════════════════════════════════════╝"
+                    echo ""
+                    tampered=1
+                fi
+            fi
+        done < "$INTEGRITY_MANIFEST"
+        if [ "$tampered" -eq 1 ]; then
+            return 1
+        fi
+        return 0  # 本地校验通过
+    fi
+
+    # 无 Manifest 且无网络，跳过校验（首次安装场景）
+    return 0
+}
+
+# 执行自检（失败则拒绝所有操作）
+if ! verify_self_integrity; then
+    exit 2
+fi
+
 # ── 读取 Hook 输入（JSON from stdin）────────────────────────
 INPUT=$(cat)
 

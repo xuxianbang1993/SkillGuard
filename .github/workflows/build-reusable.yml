@@ -1,0 +1,61 @@
+name: Build (Reusable)
+
+# SLSA Level 3 要求：构建逻辑必须在 reusable workflow 中
+# 调用方无法修改此 workflow 的构建步骤，确保构建隔离
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded artifact"
+        value: ${{ jobs.build.outputs.artifact-name }}
+      artifact-hash:
+        description: "SHA256 hash of the artifact"
+        value: ${{ jobs.build.outputs.artifact-hash }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.package.outputs.artifact-name }}
+      artifact-hash: ${{ steps.hash.outputs.artifact-hash }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package release
+        id: package
+        run: |
+          ARTIFACT="skillguard-${{ inputs.version }}.tar.gz"
+          tar czf "$ARTIFACT" \
+            skillguard-gate.sh \
+            skillguard-audit.sh \
+            skillguard-write.sh \
+            一键配置.sh \
+            generate-checksums.sh \
+            Dockerfile.skillguard \
+            run-tests.sh \
+            test-fixtures/ \
+            checksums.sha256 \
+            LICENSE \
+            README.md
+          echo "artifact-name=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA256 checksum
+        id: hash
+        run: |
+          ARTIFACT="skillguard-${{ inputs.version }}.tar.gz"
+          HASH=$(sha256sum "$ARTIFACT" | cut -d' ' -f1)
+          echo "$HASH  $ARTIFACT" > checksums-release.sha256
+          echo "artifact-hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: |
+            skillguard-${{ inputs.version }}.tar.gz
+            checksums-release.sha256

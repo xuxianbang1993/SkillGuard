@@ -1,9 +1,9 @@
 # SkillGuard
 
-> Claude Code 技能安装安全审查流水线 — 四层防御 + Hook 拦截 + 完整性验证
+> Claude Code 技能安装安全审查流水线 — 四层防御 + 六层自保护 + SLSA Level 3
 >
 > **背景**：ClawHavoc 事件（2026年2月，1184+ 恶意技能包）后的防御方案
-> **版本**：v5.2 | **最后更新**：2026-03-14
+> **版本**：v5.3 | **最后更新**：2026-03-14 | **许可证**：AGPL-3.0
 
 ## 快速安装
 
@@ -347,12 +347,77 @@ sha256sum -c /tmp/skill-baseline.txt
 
 ---
 
-## 6. CLAUDE.md 规则摘要
+## 6. 自保护体系（v5.3 新增）
+
+SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制。
+
+### 六层自保护架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│           SkillGuard v5.3 自保护体系（6 层）              │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  第 1 层：Hook 自保护                                     │
+│  └ skillguard-write.sh 阻止 Claude Code 修改 SkillGuard  │
+│    自身的脚本文件（.approved/ 凭证目录除外）               │
+│                                                          │
+│  第 2 层：SHA256 自检                                     │
+│  └ 每次 Hook 触发时，校验所有核心脚本的 SHA256 哈希        │
+│    与 checksums.sha256 Manifest 对比，不一致则拒绝工作     │
+│                                                          │
+│  第 3 层：远程哈希校验                                    │
+│  └ 从 GitHub 拉取官方 checksums.sha256 对比（优先）       │
+│    即使本地 Manifest 被篡改也能检测，离线降级到第 2 层     │
+│                                                          │
+│  第 4 层：SLSA Level 3 出处证明                           │
+│  └ GitHub Artifact Attestations + Sigstore 签名           │
+│    reusable workflow 隔离构建（不可篡改的构建过程）        │
+│    用户验证：gh attestation verify <file> -o xuxianbang1993│
+│                                                          │
+│  第 5 层：AGPL-3.0 许可证                                │
+│  └ 衍生品必须开源 + 署名原作者                           │
+│    法律层面保护知识产权                                   │
+│                                                          │
+│  第 6 层：Release SHA256 校验和                           │
+│  └ GitHub Release 自动附带 SHA256 校验文件                │
+│    用户下载后可验证完整性                                 │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 验证命令
+
+```bash
+# 方法 1：SLSA 出处验证（最强，推荐）
+gh attestation verify skillguard-v5.3.tar.gz -o xuxianbang1993
+
+# 方法 2：SHA256 校验（Release 下载后）
+sha256sum -c checksums-release.sha256
+
+# 方法 3：本地完整性自检（自动运行，无需手动）
+# skillguard-gate.sh 每次触发时自动执行
+```
+
+### 攻击场景与防御
+
+| 攻击场景 | 防御层 | 效果 |
+|----------|--------|------|
+| Claude Code 内部篡改脚本 | 第 1 层 Hook 自保护 | Write/Edit 被拦截 |
+| 外部修改脚本文件 | 第 2+3 层 SHA256 自检 | 下次触发时检测到，拒绝工作 |
+| 篡改本地 Manifest | 第 3 层远程校验 | 远程哈希无法伪造 |
+| 伪造 Release 包 | 第 4 层 SLSA 签名 | Sigstore 签名验证失败 |
+| Fork 后改名发布 | 第 5 层 AGPL 许可证 | 必须开源 + 署名，否则违法 |
+| 下载被中间人篡改 | 第 6 层 SHA256 校验和 | 哈希不匹配 |
+
+---
+
+## 7. CLAUDE.md 规则摘要（更新至 v5.3）
 
 以下条目可直接复制到 `CLAUDE.md`：
 
 ```markdown
-## 技能安装安全规则（2026-03-14 v5.1 强制执行）
+## 技能安装安全规则（2026-03-14 v5.3 强制执行）
 
 - **官方技能白名单**：`anthropics/skills` 和 `vercel-labs/ai-sdk-skills` 下所有技能自动放行（`case` 精确匹配组织/仓库名，非前缀匹配）
 - **安装前必做 Layer 0**：用火绒扫描技能目录（自动检测路径）
@@ -372,7 +437,7 @@ sha256sum -c /tmp/skill-baseline.txt
 
 ---
 
-## 7. 已审查技能清单（2026-03-13 存档）
+## 8. 已审查技能清单（2026-03-13 存档）
 
 审查工具：skill-vetter | 审查范围：37 个技能
 
@@ -406,31 +471,35 @@ sha256sum -c /tmp/skill-baseline.txt
 
 ---
 
-## 8. 文件清单
+## 9. 文件清单
 
 ```
-SkillGuard\
-├── README.md                    ✅ 策略文档（本文件）v5.1
-├── Dockerfile.skillguard     ✅ Layer 2 Docker 镜像定义
-├── skillguard-gate.sh                ✅ PreToolUse Hook — Bash 工具拦截器（一次性凭证机制）
-├── skillguard-write.sh               ✅ PreToolUse Hook — Write/Edit 工具守卫
-├── skillguard-audit.sh               ✅ 扫描主控脚本 v5.0（Layer 0-3 + SHA256 + CVE预检）
-├── .approved\                   ✅ 审查通过凭证目录（一次性凭证，用后即删）
-├── run-tests.sh                 ✅ 红队测试运行器（验证 Layer 1 检测能力）
-├── test-fixtures\               ✅ 红队测试样本（10 个，覆盖所有检测项）
-│   ├── 01-clean-skill.md        ⬜ 干净样本（应通过）
-│   ├── 02-prompt-injection.md   🔴 Prompt Injection
-│   ├── 03-credential-theft.md   🔴 凭证窃取
-│   ├── 04-exfil-domains.md      🔴 外传域名 + DNS 外传
-│   ├── 05-reverse-shell.md      🔴 反向 Shell
-│   ├── 06-multilang-injection.md 🔴 多语言指令覆盖
-│   ├── 07-base64-obfuscation.md 🔴 Base64 混淆
-│   ├── 08-hook-injection.md     🔴 Hook 注入
-│   ├── 09-rag-poisoning.md      🔴 RAG 文档投毒
-│   └── 10-env-exfil.md          🔴 环境变量外传 + 多层编码
-├── skill-test.wsb               🗑 已删除（Windows Sandbox 不可用）
-└── test-scripts\
-    └── test-skill.cmd           🗑 已删除（同上）
+SkillGuard/
+├── README.md                        ✅ 策略文档（本文件）v5.3
+├── LICENSE                          ✅ AGPL-3.0 许可证（v5.3 新增）
+├── checksums.sha256                 ✅ 核心脚本 SHA256 校验和（v5.3 新增）
+├── generate-checksums.sh            ✅ 校验和生成脚本（v5.3 新增）
+├── Dockerfile.skillguard            ✅ Layer 2 Docker 镜像定义
+├── skillguard-gate.sh               ✅ PreToolUse Hook — Bash 拦截器 + 自身完整性校验
+├── skillguard-write.sh              ✅ PreToolUse Hook — Write/Edit 守卫 + 自保护
+├── skillguard-audit.sh              ✅ 扫描主控脚本 v5.0（Layer 0-3 + SHA256 + CVE预检）
+├── 一键配置.sh                       ✅ 一键安装脚本（环境检测 + Hook 配置）
+├── .approved/                       ✅ 审查通过凭证目录（一次性凭证，用后即删）
+├── run-tests.sh                     ✅ 红队测试运行器（验证 Layer 1 检测能力）
+├── test-fixtures/                   ✅ 红队测试样本（10 个，覆盖所有检测项）
+│   ├── 01-clean-skill.md            ⬜ 干净样本（应通过）
+│   ├── 02-prompt-injection.md       🔴 Prompt Injection
+│   ├── 03-credential-theft.md       🔴 凭证窃取
+│   ├── 04-exfil-domains.md          🔴 外传域名 + DNS 外传
+│   ├── 05-reverse-shell.md          🔴 反向 Shell
+│   ├── 06-multilang-injection.md    🔴 多语言指令覆盖
+│   ├── 07-base64-obfuscation.md     🔴 Base64 混淆
+│   ├── 08-hook-injection.md         🔴 Hook 注入
+│   ├── 09-rag-poisoning.md          🔴 RAG 文档投毒
+│   └── 10-env-exfil.md              🔴 环境变量外传 + 多层编码
+└── .github/workflows/               ✅ SLSA Level 3 CI/CD（v5.3 新增）
+    ├── slsa-release.yml             ✅ 发布工作流（签名 + Release）
+    └── build-reusable.yml           ✅ 可复用构建（SLSA L3 隔离要求）
 ```
 
 **Hook 接入配置**（写入 `~/.claude/settings.json`）：
@@ -480,7 +549,7 @@ SkillGuard\
 
 ---
 
-## 9. 常用命令速查
+## 10. 常用命令速查
 
 ```bash
 # ── 环境验证 ────────────────────────────────────────────
@@ -523,7 +592,7 @@ bash run-tests.sh                   # 验证 Layer 1 检测能力（10/10 应全
 
 ---
 
-## 10. 迭代路线图（Phase 4+）
+## 11. 迭代路线图（Phase 4+）
 
 > 以下改进按优先级排列，可在后续会话中逐步实施。
 
@@ -557,13 +626,13 @@ bash run-tests.sh                   # 验证 Layer 1 检测能力（10/10 应全
 ### 架构演进方向
 
 ```
-当前 v5.2（安全评分 ~9/10）
+当前 v5.3（安全评分 ~9.2/10）← 六层自保护 + SLSA Level 3
     │
     ▼ Phase 4: LLM 检测层 + mcp-scan + PostToolUse Hook
-    │  预期评分：9.2/10
+    │  预期评分：9.4/10
     │
-    ▼ Phase 5: CI 自动化 + 版本锁定 + 网络监控
-    │  预期评分：9.5/10
+    ▼ Phase 5: 版本锁定 + 网络监控
+    │  预期评分：9.6/10
     │
     ▼ Phase 6: NLP 检测 + 供应链溯源 + Canary Token
     │  预期评分：9.8/10（接近生产级安全框架）

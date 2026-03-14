@@ -89,6 +89,17 @@ if echo "$NORM_PATH" | grep -qE '\.git/hooks/'; then
     REASON="Git Hooks（仓库级持久化）"
 fi
 
+# 8. SkillGuard 自保护（防止篡改审计脚本本身）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NORM_SCRIPT_DIR=$(normalize_path "$SCRIPT_DIR")
+if echo "$NORM_PATH" | grep -qF "$NORM_SCRIPT_DIR/"; then
+    # 允许 .approved/ 目录的写入（凭证机制需要）
+    if ! echo "$NORM_PATH" | grep -qF "$NORM_SCRIPT_DIR/.approved/"; then
+        BLOCKED=1
+        REASON="SkillGuard 自保护（禁止修改审计脚本）"
+    fi
+fi
+
 # ── 内容注入检测（对非拦截路径也检查恶意内容）───────────────
 CONTENT_ALERT=""
 if [ -n "$CONTENT" ] && [ "$BLOCKED" -eq 0 ]; then
