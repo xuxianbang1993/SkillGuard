@@ -3,7 +3,7 @@
 > Claude Code 技能安装安全审查流水线 — 四层防御 + 六层自保护 + SLSA Level 3
 >
 > **背景**：ClawHavoc 事件（2026年2月，1184+ 恶意技能包）后的防御方案
-> **版本**：v5.4 | **最后更新**：2026-03-15 | **许可证**：AGPL-3.0
+> **版本**：v5.6 | **最后更新**：2026-03-15 | **许可证**：AGPL-3.0
 
 ## 快速安装
 
@@ -30,7 +30,7 @@ cd SkillGuard
 bash update.sh
 
 # 更新后自动显示：
-#   ✅ 更新完成：v5.3 → v5.4
+#   ✅ 更新完成：v5.4 → v5.6
 #   🆕 新功能：自动更新检查、一键更新脚本...
 #   ⬆️ 改进：...
 #   🔧 修复：...
@@ -373,7 +373,7 @@ SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│           SkillGuard v5.4 自保护体系（6 层）              │
+│           SkillGuard v5.6 自保护体系（6 层）              │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │  第 1 层：Hook 自保护                                     │
@@ -408,7 +408,7 @@ SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制
 
 ```bash
 # 方法 1：SLSA 出处验证（最强，推荐）
-gh attestation verify skillguard-v5.4.tar.gz -o xuxianbang1993
+gh attestation verify skillguard-v5.6.tar.gz -o xuxianbang1993
 
 # 方法 2：SHA256 校验（Release 下载后）
 sha256sum -c checksums-release.sha256
@@ -430,12 +430,12 @@ sha256sum -c checksums-release.sha256
 
 ---
 
-## 7. CLAUDE.md 规则摘要（更新至 v5.4）
+## 7. CLAUDE.md 规则摘要（更新至 v5.6）
 
 以下条目可直接复制到 `CLAUDE.md`：
 
 ```markdown
-## 技能安装安全规则（2026-03-15 v5.4 强制执行）
+## 技能安装安全规则（2026-03-15 v5.6 强制执行）
 
 - **官方技能白名单**：`anthropics/skills` 和 `vercel-labs/ai-sdk-skills` 下所有技能自动放行（`case` 精确匹配组织/仓库名，非前缀匹配）
 - **安装前必做 Layer 0**：用火绒扫描技能目录（自动检测路径）
@@ -494,10 +494,11 @@ sha256sum -c checksums-release.sha256
 
 ```
 SkillGuard/
-├── README.md                        ✅ 策略文档（本文件）v5.4
-├── VERSION                          ✅ 版本号文件（v5.4 新增）
-├── CHANGELOG.md                     ✅ 结构化更新日志（v5.4 新增）
-├── update.sh                        ✅ 一键更新脚本（v5.4 新增）
+├── README.md                        ✅ 策略文档（本文件）v5.6
+├── VERSION                          ✅ 版本号文件
+├── CHANGELOG.md                     ✅ 结构化更新日志
+├── update.sh                        ✅ 一键更新脚本
+├── uninstall.sh                     ✅ 一键卸载脚本（v5.6 新增）
 ├── LICENSE                          ✅ AGPL-3.0 许可证（v5.3 新增）
 ├── checksums.sha256                 ✅ 核心脚本 SHA256 校验和（v5.3 新增）
 ├── generate-checksums.sh            ✅ 校验和生成脚本（v5.3 新增）
@@ -652,7 +653,7 @@ bash run-tests.sh                   # 验证 Layer 1 检测能力（10/10 应全
 ### 架构演进方向
 
 ```
-当前 v5.4（安全评分 ~9.2/10）← 六层自保护 + SLSA Level 3 + 自动更新
+当前 v5.6（安全评分 ~9.5/10）← 六层自保护 + SLSA Level 3 + 安全加固 + 跨平台兼容
     │
     ▼ Phase 4: LLM 检测层 + mcp-scan + PostToolUse Hook
     │  预期评分：9.4/10
