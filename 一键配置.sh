@@ -10,6 +10,14 @@
 
 set -uo pipefail
 
+# ── 非交互模式（--yes / -y）────────────────────────────────
+AUTO_YES=0
+for arg in "$@"; do
+    case "$arg" in
+        --yes|-y) AUTO_YES=1 ;;
+    esac
+done
+
 # ── 颜色输出 ────────────────────────────────────────────────
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -167,7 +175,12 @@ if [ $DOCKER_OK -eq 1 ]; then
         echo ""
         echo -e "   ${CYAN}是否现在构建 Docker 扫描镜像？（约 1-2 分钟）${NC}"
         echo -e "   ${CYAN}命令：docker build -t skillguard -f Dockerfile.skillguard .${NC}"
-        read -p "   构建？[Y/n] " BUILD_CHOICE
+        if [ $AUTO_YES -eq 1 ]; then
+            BUILD_CHOICE="Y"
+            echo "   构建？[Y/n] Y（--yes 自动确认）"
+        else
+            read -p "   构建？[Y/n] " BUILD_CHOICE
+        fi
         if [[ "${BUILD_CHOICE:-Y}" =~ ^[Yy]$ ]] || [ -z "$BUILD_CHOICE" ]; then
             echo ""
             echo "   正在构建 skillguard 镜像..."
@@ -436,27 +449,106 @@ JSONEOF
 fi
 
 # ════════════════════════════════════════════════════════════
-#  Step 4：验证安装
+#  Step 4：验证安装（回读验证，不信任写入脚本的输出）
 # ════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Step 3/4：脚本语法验证 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "━━━ Step 3/4：安装验证（回读确认）━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 ALL_OK=1
+HOOKS_VERIFIED=0
+
+# ── 3.1 脚本语法验证 ─────────────────────────────────────────
 for f in skillguard-gate.sh skillguard-audit.sh skillguard-write.sh run-tests.sh; do
     if bash -n "$SCRIPT_DIR/$f" 2>/dev/null; then
-        log_ok "$f"
+        log_ok "$f 语法正确"
     else
         log_fail "$f 语法错误"
         ALL_OK=0
     fi
 done
 
-# 验证 settings.json
+# ── 3.2 settings.json 格式验证 ───────────────────────────────
 if [ -n "$PY_CMD" ]; then
     $PY_CMD -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" "$SETTINGS_FILE" 2>/dev/null && \
-        log_ok "settings.json 格式有效" || \
-        { log_fail "settings.json 格式无效"; ALL_OK=0; }
+        log_ok "settings.json JSON 格式有效" || \
+        { log_fail "settings.json JSON 格式无效"; ALL_OK=0; }
+fi
+
+# ── 3.3 关键验证：回读 settings.json 确认 hooks 确实写入 ────────
+echo ""
+echo -e "   ${BOLD}▸ 回读 settings.json 验证 hooks...${NC}"
+if [ -f "$SETTINGS_FILE" ]; then
+    # 检查 PreToolUse 是否存在且包含 skillguard
+    if [ -n "$PY_CMD" ]; then
+        VERIFY_RESULT=$($PY_CMD -c "
+import json, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        settings = json.load(f)
+    hooks = settings.get('hooks', {}).get('PreToolUse', [])
+    gate_found = False
+    write_found = False
+    edit_found = False
+    for h in hooks:
+        matcher = h.get('matcher', '')
+        cmds = [hh.get('command', '') for hh in h.get('hooks', [])]
+        cmd_str = ' '.join(cmds).lower()
+        if matcher == 'Bash' and 'skillguard-gate' in cmd_str:
+            gate_found = True
+        elif matcher == 'Write' and 'skillguard-write' in cmd_str:
+            write_found = True
+        elif matcher == 'Edit' and 'skillguard-write' in cmd_str:
+            edit_found = True
+    if gate_found and write_found and edit_found:
+        print('ALL_OK')
+    else:
+        missing = []
+        if not gate_found: missing.append('Bash/gate')
+        if not write_found: missing.append('Write')
+        if not edit_found: missing.append('Edit')
+        print('MISSING:' + ','.join(missing))
+except Exception as e:
+    print('ERROR:' + str(e))
+" "$SETTINGS_FILE" 2>/dev/null)
+
+        if [ "$VERIFY_RESULT" = "ALL_OK" ]; then
+            log_ok "回读确认：PreToolUse hooks 全部就位（Bash/Write/Edit）"
+            HOOKS_VERIFIED=1
+        elif echo "$VERIFY_RESULT" | grep -q "^MISSING:"; then
+            MISSING_HOOKS=$(echo "$VERIFY_RESULT" | sed 's/^MISSING://')
+            log_fail "回读发现 hooks 缺失：$MISSING_HOOKS"
+            log_fail "settings.json 写入失败！请检查文件权限或手动配置"
+            ALL_OK=0
+        else
+            log_fail "回读验证出错：$VERIFY_RESULT"
+            ALL_OK=0
+        fi
+    else
+        # 无 Python，用 grep 降级验证
+        if grep -q "skillguard-gate" "$SETTINGS_FILE" && grep -q "skillguard-write" "$SETTINGS_FILE"; then
+            log_ok "回读确认：settings.json 包含 skillguard hooks（grep 降级验证）"
+            HOOKS_VERIFIED=1
+        else
+            log_fail "回读发现 hooks 未写入 settings.json"
+            ALL_OK=0
+        fi
+    fi
+else
+    log_fail "settings.json 不存在！"
+    ALL_OK=0
+fi
+
+# ── 3.4 验证 hook 路径指向的脚本文件确实存在 ──────────────────
+if [ $HOOKS_VERIFIED -eq 1 ]; then
+    if [ -f "$SG_PATH/skillguard-gate.sh" ] && [ -f "$SG_PATH/skillguard-write.sh" ]; then
+        log_ok "Hook 目标文件存在：$SG_PATH/skillguard-{gate,write}.sh"
+    else
+        log_fail "Hook 路径指向的脚本文件不存在！"
+        [ ! -f "$SG_PATH/skillguard-gate.sh" ] && log_fail "  缺失：$SG_PATH/skillguard-gate.sh"
+        [ ! -f "$SG_PATH/skillguard-write.sh" ] && log_fail "  缺失：$SG_PATH/skillguard-write.sh"
+        ALL_OK=0
+    fi
 fi
 
 # ════════════════════════════════════════════════════════════
@@ -468,7 +560,12 @@ echo ""
 
 if [ -f "$SCRIPT_DIR/run-tests.sh" ] && [ -d "$SCRIPT_DIR/test-fixtures" ]; then
     echo -e "   ${CYAN}运行红队测试验证 Layer 1 检测能力？（10 个攻击样本）${NC}"
-    read -p "   运行？[Y/n] " TEST_CHOICE
+    if [ $AUTO_YES -eq 1 ]; then
+        TEST_CHOICE="Y"
+        echo "   运行？[Y/n] Y（--yes 自动确认）"
+    else
+        read -p "   运行？[Y/n] " TEST_CHOICE
+    fi
     if [[ "${TEST_CHOICE:-Y}" =~ ^[Yy]$ ]] || [ -z "$TEST_CHOICE" ]; then
         bash "$SCRIPT_DIR/run-tests.sh"
         TEST_RESULT=$?
@@ -486,28 +583,137 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════
-#  最终汇总
+#  最终汇总（基于实际验证结果，非假设）
 # ════════════════════════════════════════════════════════════
 echo ""
+echo "━━━ 最终验证：实际状态确认 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# 重新检测各组件实际状态（不信任之前的变量，实际运行命令确认）
+FINAL_HOOK="❌ 未写入"
+FINAL_DOCKER="❌ 未运行"
+FINAL_IMAGE="❌ 未构建"
+FINAL_SANDBOX="❌ 不可用"
+FINAL_HUORONG="⚠️  未检测"
+FINAL_PYTHON="❌ 未安装"
+
+# Hook 状态（已在 3.3 验证）
+if [ $HOOKS_VERIFIED -eq 1 ]; then
+    FINAL_HOOK="✅ 已写入并验证"
+fi
+
+# Docker 实际状态
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    DOCKER_VER_FINAL=$(docker --version 2>/dev/null | head -1)
+    FINAL_DOCKER="✅ 运行中（$DOCKER_VER_FINAL）"
+
+    # 镜像实际状态
+    if docker images skillguard -q 2>/dev/null | grep -q .; then
+        FINAL_IMAGE="✅ 已构建"
+    fi
+
+    # Sandbox 实际状态
+    if docker sandbox ls &>/dev/null 2>&1; then
+        FINAL_SANDBOX="✅ 可用"
+    fi
+elif command -v docker &>/dev/null; then
+    FINAL_DOCKER="⚠️  已安装但未运行"
+else
+    FINAL_DOCKER="❌ 未安装"
+fi
+
+# 火绒实际状态（Windows 环境）
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || command -v powershell.exe &>/dev/null; then
+    # 检查进程是否在运行（最可靠的方式）
+    if command -v powershell.exe &>/dev/null; then
+        HR_PROC=$(powershell.exe -NoProfile -Command \
+            "Get-Process -Name 'HipsMain','HipsDaemon' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path" \
+            2>/dev/null | tr -d '\r')
+        if [ -n "$HR_PROC" ]; then
+            FINAL_HUORONG="✅ 运行中（$HR_PROC）"
+        else
+            # 进程没跑，看文件是否存在
+            for candidate in "C:/Program Files/Huorong/Sysdiag/bin/HipsMain.exe" \
+                             "C:/Program Files (x86)/Huorong/Sysdiag/bin/HipsMain.exe"; do
+                if [ -f "$candidate" ]; then
+                    FINAL_HUORONG="⚠️  已安装但未运行（$candidate）"
+                    break
+                fi
+            done
+            if echo "$FINAL_HUORONG" | grep -q "未检测"; then
+                FINAL_HUORONG="❌ 未安装"
+            fi
+        fi
+    else
+        # 无 powershell，检查文件
+        for candidate in "C:/Program Files/Huorong/Sysdiag/bin/HipsMain.exe" \
+                         "C:/Program Files (x86)/Huorong/Sysdiag/bin/HipsMain.exe"; do
+            if [ -f "$candidate" ]; then
+                FINAL_HUORONG="⚠️  已安装（无法确认运行状态）"
+                break
+            fi
+        done
+    fi
+else
+    FINAL_HUORONG="ℹ️  非 Windows，Layer 0 跳过"
+fi
+
+# Python 实际状态
+if [ -n "$PY_CMD" ]; then
+    PY_VER_FINAL=$($PY_CMD --version 2>&1)
+    FINAL_PYTHON="✅ $PY_VER_FINAL"
+fi
+
 echo "╔══════════════════════════════════════════════════════════╗"
-if [ $ALL_OK -eq 1 ] && [ $ENV_SCORE -ge $((ENV_TOTAL - 2)) ]; then
+if [ $ALL_OK -eq 1 ] && [ $HOOKS_VERIFIED -eq 1 ]; then
     echo "║  ✅ SkillGuard 配置完成！                                 ║"
     echo "╠══════════════════════════════════════════════════════════╣"
     echo "║                                                        ║"
     echo "║  Hook 已激活，重启 Claude Code 即生效                     ║"
     echo "║  安装任何非官方技能时将自动触发安全审查                     ║"
-    echo "║                                                        ║"
-    echo "║  防御能力：                                              ║"
-    printf "║    环境就绪度：%-42s║\n" "$ENV_SCORE / $ENV_TOTAL"
-    printf "║    Layer 0 火绒 AV：%-37s║\n" "$L0_STATUS"
-    printf "║    Layer 1 语义扫描：%-36s║\n" "$L1_STATUS"
-    printf "║    Layer 2 容器扫描：%-36s║\n" "$L2_STATUS"
-    printf "║    Layer 3 动态测试：%-36s║\n" "$L3_STATUS"
-    echo "║                                                        ║"
 else
-    echo "║  ⚠️  SkillGuard 部分配置完成                               ║"
+    echo "║  ❌ SkillGuard 配置失败                                   ║"
     echo "╠══════════════════════════════════════════════════════════╣"
-    echo "║  请检查上方警告并安装缺失的依赖                            ║"
+    echo "║  请检查上方错误信息并修复后重新运行                        ║"
 fi
+echo "║                                                        ║"
+echo "║  实际验证结果（以下均为运行命令确认，非假设）：             ║"
+echo "║                                                        ║"
+printf "║    Hooks：   %-44s║\n" "$FINAL_HOOK"
+printf "║    Docker：  %-44s║\n" "$FINAL_DOCKER"
+printf "║    镜像：    %-44s║\n" "$FINAL_IMAGE"
+printf "║    Sandbox： %-44s║\n" "$FINAL_SANDBOX"
+printf "║    火绒：    %-44s║\n" "$FINAL_HUORONG"
+printf "║    Python：  %-44s║\n" "$FINAL_PYTHON"
+echo "║                                                        ║"
+echo "║  Layer 可用性：                                           ║"
+# Layer 状态基于实际验证结果重新计算
+L0_FINAL="✅"
+if echo "$FINAL_HUORONG" | grep -qE "❌|未检测"; then
+    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+        L0_FINAL="⚠️  跳过（火绒未就绪）"
+    else
+        L0_FINAL="ℹ️  跳过（非 Windows）"
+    fi
+fi
+L1_FINAL="✅"
+if echo "$FINAL_PYTHON" | grep -q "❌"; then
+    L1_FINAL="⚠️  降级（Python 未安装）"
+fi
+L2_FINAL="❌ 不可用"
+if echo "$FINAL_DOCKER" | grep -q "✅" && echo "$FINAL_IMAGE" | grep -q "✅"; then
+    L2_FINAL="✅"
+elif echo "$FINAL_DOCKER" | grep -q "✅"; then
+    L2_FINAL="⚠️  Docker 就绪但镜像未构建"
+fi
+L3_FINAL="❌ 不可用"
+if echo "$FINAL_SANDBOX" | grep -q "✅"; then
+    L3_FINAL="✅"
+fi
+printf "║    Layer 0 火绒 AV：    %-33s║\n" "$L0_FINAL"
+printf "║    Layer 1 语义扫描：   %-33s║\n" "$L1_FINAL"
+printf "║    Layer 2 容器扫描：   %-33s║\n" "$L2_FINAL"
+printf "║    Layer 3 动态测试：   %-33s║\n" "$L3_FINAL"
+echo "║                                                        ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""

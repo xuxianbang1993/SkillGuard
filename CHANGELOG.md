@@ -4,6 +4,21 @@
 
 ---
 
+## [5.6.2] - 2026-03-15
+
+### 修复
+- **安装脚本 hooks 写入无验证**（CRITICAL）：`一键配置.sh` 写入 hooks 后从未回读 `settings.json` 确认写入成功，导致脚本报告"配置完成"但 hooks 实际缺失。新增回读验证步骤，逐一确认 Bash/Write/Edit 三个 PreToolUse hook 存在
+- **最终状态报告编造**（CRITICAL）：Docker、火绒、Sandbox 等组件状态基于中间变量假设，而非安装完成后实际运行命令确认。最终汇总改为重新执行 `docker info`、`Get-Process`（火绒）、`docker images`、`docker sandbox ls` 等命令获取真实状态
+- **非交互模式缺失**（HIGH）：Docker 镜像构建和红队测试的 `read -p` 交互提示在 Claude Code Bash 工具中无法使用，导致自动安装被阻塞。新增 `--yes` / `-y` 参数跳过所有交互提示
+- **Hook 目标文件验证**：回读验证后额外检查 hook 路径指向的 `.sh` 文件是否确实存在
+- **火绒检测增强**：最终验证使用 PowerShell `Get-Process` 检查火绒进程是否实际运行，而非仅检查文件是否存在
+
+### 改进
+- 安装脚本用法更新：`bash 一键配置.sh --yes`（非交互自动安装）
+- 最终报告明确标注"以下均为运行命令确认，非假设"
+
+---
+
 ## [5.6.1] - 2026-03-15
 
 ### 修复
