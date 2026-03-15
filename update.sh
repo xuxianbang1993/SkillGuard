@@ -144,8 +144,16 @@ if [ -f "$SCRIPT_DIR/一键配置.sh" ]; then
     GATE_CMD="bash $SG_PATH/skillguard-gate.sh"
     WRITE_CMD="bash $SG_PATH/skillguard-write.sh"
 
+    # 确定 Python 命令（兼容 Windows Git Bash）
+    PY_CMD=""
     if command -v python3 &>/dev/null; then
-        python3 -c "
+        PY_CMD="python3"
+    elif command -v python &>/dev/null; then
+        PY_CMD="python"
+    fi
+
+    if [ -n "$PY_CMD" ]; then
+        $PY_CMD -c "
 import json, os, sys
 
 settings_file = sys.argv[1]
@@ -162,7 +170,7 @@ if os.path.exists(settings_file):
 
 sg_hooks = {
     'PreToolUse': [
-        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': gate_cmd}]},
+        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': gate_cmd, 'timeout': 300000}]},
         {'matcher': 'Write', 'hooks': [{'type': 'command', 'command': write_cmd}]},
         {'matcher': 'Edit', 'hooks': [{'type': 'command', 'command': write_cmd}]}
     ]
@@ -186,7 +194,7 @@ print('OK')
             log_warn "Hook 配置更新失败，请手动运行：bash 一键配置.sh"
         fi
     else
-        log_info "未找到 python3，请手动运行：bash 一键配置.sh"
+        log_info "未找到 Python，请手动运行：bash 一键配置.sh"
     fi
 else
     log_warn "一键配置.sh 不存在，请手动配置 Hook"
@@ -212,7 +220,7 @@ else
         while IFS= read -r line; do
             # 检测版本号标题行 ## [x.y]
             if echo "$line" | grep -qE '^\#\# \['; then
-                VER=$(echo "$line" | grep -oP '\[\K[^\]]+')
+                VER=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
                 if [ "$VER" = "$NEW_VERSION" ]; then
                     IN_RANGE=1
                     continue

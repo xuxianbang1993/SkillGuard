@@ -5,31 +5,64 @@
 # 输入：stdin 收到 JSON，格式 {"tool_name":"Bash","tool_input":{"command":"..."}}
 # 行为：若检测到技能安装命令，拦截并启动 SkillGuard 隔离审查流水线
 # 配套：skillguard-write.sh（拦截 Write/Edit 工具对敏感路径的写入）
+#
+# 重要：stdout 必须为纯 JSON 或空（Claude Code 要求）。所有提示信息输出到 stderr。
+# 阻塞使用 exit 2（官方文档推荐），exit 0 为放行。
 
-set -euo pipefail
+set -uo pipefail
+# 注意：不使用 set -e，因为后台进程和条件检查会导致意外退出
+
+# ── 清理 trap ─────────────────────────────────────────────────
+cleanup() {
+    # 清理可能残留的后台进程
+    kill "$UPDATE_PID" 2>/dev/null || true
+    kill "$DOCKER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+UPDATE_PID=""
+DOCKER_PID=""
 
 # ── 路径配置 ────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR_LOWER=$(echo "$SCRIPT_DIR" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
 AUDIT_SCRIPT="$SCRIPT_DIR/skillguard-audit.sh"
+VERSION_FILE="$SCRIPT_DIR/VERSION"
+INTEGRITY_MANIFEST="$SCRIPT_DIR/checksums.sha256"
+
+# 跨平台临时目录
+SG_TMPDIR="${TMPDIR:-/tmp}"
 
 # 审查通过凭证目录（通过审查的技能在此留下凭证，避免重复审查死循环）
 APPROVED_DIR="$SCRIPT_DIR/.approved"
 mkdir -p "$APPROVED_DIR" 2>/dev/null || true
 
+# ── 跨平台 sha256 计算函数 ──────────────────────────────────
+compute_sha256() {
+    local file="$1"
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$file" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1
+    else
+        echo ""
+    fi
+}
+
 # ── 凭证函数 ────────────────────────────────────────────────
-# 检查技能是否有有效的审查通过凭证（一次性：验证后立即删除）
 has_valid_approval() {
     local source="$1"
-    # 用 SHA256 哈希作为文件名（避免特殊字符问题）
     local hash
-    hash=$(echo -n "$source" | sha256sum | cut -d' ' -f1)
+    hash=$(echo -n "$source" | compute_sha256 /dev/stdin 2>/dev/null || echo -n "$source" | sha256sum 2>/dev/null | cut -d' ' -f1 || echo "")
+    # fallback: 用简单字符串哈希
+    if [ -z "$hash" ]; then
+        hash=$(echo -n "$source" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$source")
+    fi
     local cert_file="$APPROVED_DIR/$hash"
 
     if [ ! -f "$cert_file" ]; then
-        return 1  # 无凭证
+        return 1
     fi
 
-    # 检查时效（5 分钟 = 300 秒，仅防止凭证被遗忘未使用的情况）
     local cert_time
     cert_time=$(cat "$cert_file" 2>/dev/null || echo "0")
     local now
@@ -37,25 +70,24 @@ has_valid_approval() {
     local age=$((now - cert_time))
 
     if [ $age -gt 300 ]; then
-        rm -f "$cert_file"  # 过期，删除
+        rm -f "$cert_file"
         return 1
     fi
 
-    # 一次性凭证：验证有效后立即删除，下次安装必须重新审查
     rm -f "$cert_file"
-
-    return 0  # 有效（已消费）
+    return 0
 }
 
-# 颁发审查通过凭证
 grant_approval() {
     local source="$1"
     local hash
-    hash=$(echo -n "$source" | sha256sum | cut -d' ' -f1)
+    hash=$(echo -n "$source" | compute_sha256 /dev/stdin 2>/dev/null || echo -n "$source" | sha256sum 2>/dev/null | cut -d' ' -f1 || echo "")
+    if [ -z "$hash" ]; then
+        hash=$(echo -n "$source" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$source")
+    fi
     date +%s > "$APPROVED_DIR/$hash"
 }
 
-# 清理所有过期凭证（每次运行时顺带清理，5分钟超时）
 cleanup_expired_approvals() {
     local now
     now=$(date +%s)
@@ -72,10 +104,6 @@ cleanup_expired_approvals() {
 cleanup_expired_approvals 2>/dev/null || true
 
 # ── 自身完整性校验（Layer: Self-Integrity）─────────────────────
-# 每次 Hook 触发时，先校验自身和兄弟脚本的 SHA256
-# 如果被篡改则拒绝工作，防止攻击者通过修改审计脚本绕过检测
-INTEGRITY_MANIFEST="$SCRIPT_DIR/checksums.sha256"
-
 verify_self_integrity() {
     # 优先：远程校验（从 GitHub 获取官方哈希）
     if command -v curl &>/dev/null; then
@@ -83,34 +111,36 @@ verify_self_integrity() {
         remote_checksums=$(curl -sf --max-time 5 \
             "https://raw.githubusercontent.com/xuxianbang1993/SkillGuard/main/checksums.sha256" 2>/dev/null)
         if [ -n "$remote_checksums" ]; then
-            # 远程校验成功，逐行比对
+            # 先检查版本差异：远程 VERSION != 本地 VERSION → 是新版本，非篡改
+            local remote_ver_check
+            remote_ver_check=$(curl -sf --max-time 3 \
+                "https://raw.githubusercontent.com/xuxianbang1993/SkillGuard/main/VERSION" 2>/dev/null \
+                | tr -d '[:space:]')
+            local local_ver_check="unknown"
+            if [ -f "$VERSION_FILE" ]; then
+                local_ver_check=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+            fi
+            if [ -n "$remote_ver_check" ] && [ "$remote_ver_check" != "$local_ver_check" ]; then
+                echo "[SkillGuard] 新版本 v${remote_ver_check} 可用（当前 v${local_ver_check}）" >&2
+                echo "[SkillGuard] 更新命令：cd $(echo "$SCRIPT_DIR" | head -c 40) && bash update.sh" >&2
+                return 0
+            fi
+            # 版本相同，逐行比对（真正的篡改检测）
             local tampered=0
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 local expected_hash expected_file
                 expected_hash=$(echo "$line" | awk '{print $1}')
                 expected_file=$(echo "$line" | awk '{print $2}')
-                # 去掉前导 * 或 ./
                 expected_file="${expected_file#\*}"
                 expected_file="${expected_file#./}"
                 local local_file="$SCRIPT_DIR/$expected_file"
                 if [ -f "$local_file" ]; then
                     local actual_hash
-                    actual_hash=$(sha256sum "$local_file" 2>/dev/null | cut -d' ' -f1)
-                    if [ "$actual_hash" != "$expected_hash" ]; then
-                        echo ""
-                        echo "╔══════════════════════════════════════════════════════════╗"
-                        echo "║  ⛔ SkillGuard 完整性校验失败（远程校验）                    ║"
-                        echo "╠══════════════════════════════════════════════════════════╣"
-                        echo "║  被篡改文件：$expected_file"
-                        echo "║  预期哈希：${expected_hash:0:16}..."
-                        echo "║  实际哈希：${actual_hash:0:16}..."
-                        echo "║                                                        ║"
-                        echo "║  SkillGuard 脚本已被修改，拒绝执行任何审计。                ║"
-                        echo "║  请从 GitHub 重新克隆：                                    ║"
-                        echo "║  git clone https://github.com/xuxianbang1993/SkillGuard  ║"
-                        echo "╚══════════════════════════════════════════════════════════╝"
-                        echo ""
+                    actual_hash=$(compute_sha256 "$local_file")
+                    if [ -n "$actual_hash" ] && [ "$actual_hash" != "$expected_hash" ]; then
+                        echo "[SkillGuard] 完整性校验失败：$expected_file 被篡改" >&2
+                        echo "[SkillGuard] 请从 GitHub 重新克隆：git clone https://github.com/xuxianbang1993/SkillGuard" >&2
                         tampered=1
                     fi
                 fi
@@ -118,7 +148,7 @@ verify_self_integrity() {
             if [ "$tampered" -eq 1 ]; then
                 return 1
             fi
-            return 0  # 远程校验通过
+            return 0
         fi
     fi
 
@@ -135,20 +165,9 @@ verify_self_integrity() {
             local local_file="$SCRIPT_DIR/$expected_file"
             if [ -f "$local_file" ]; then
                 local actual_hash
-                actual_hash=$(sha256sum "$local_file" 2>/dev/null | cut -d' ' -f1)
-                if [ "$actual_hash" != "$expected_hash" ]; then
-                    echo ""
-                    echo "╔══════════════════════════════════════════════════════════╗"
-                    echo "║  ⛔ SkillGuard 完整性校验失败（本地 Manifest）               ║"
-                    echo "╠══════════════════════════════════════════════════════════╣"
-                    echo "║  被篡改文件：$expected_file"
-                    echo "║  预期哈希：${expected_hash:0:16}..."
-                    echo "║  实际哈希：${actual_hash:0:16}..."
-                    echo "║                                                        ║"
-                    echo "║  SkillGuard 脚本已被修改，拒绝执行任何审计。                ║"
-                    echo "║  请从 GitHub 重新克隆或运行：bash generate-checksums.sh    ║"
-                    echo "╚══════════════════════════════════════════════════════════╝"
-                    echo ""
+                actual_hash=$(compute_sha256 "$local_file")
+                if [ -n "$actual_hash" ] && [ "$actual_hash" != "$expected_hash" ]; then
+                    echo "[SkillGuard] 完整性校验失败（本地）：$expected_file 被篡改" >&2
                     tampered=1
                 fi
             fi
@@ -156,7 +175,7 @@ verify_self_integrity() {
         if [ "$tampered" -eq 1 ]; then
             return 1
         fi
-        return 0  # 本地校验通过
+        return 0
     fi
 
     # 无 Manifest 且无网络，跳过校验（首次安装场景）
@@ -165,38 +184,32 @@ verify_self_integrity() {
 
 # 执行自检（失败则拒绝所有操作）
 if ! verify_self_integrity; then
+    echo '{"error":"SkillGuard integrity check failed"}' >&2
     exit 2
 fi
 
 # ── 会话级版本更新检查（每次会话只检查一次）─────────────────────
-# 利用临时文件标记，避免每个命令都检查
-UPDATE_CHECK_FLAG="/tmp/skillguard-update-checked-$(id -u 2>/dev/null || echo 0)"
-VERSION_FILE="$SCRIPT_DIR/VERSION"
+UPDATE_CHECK_FLAG="$SG_TMPDIR/skillguard-update-checked-$(id -u 2>/dev/null || echo 0)"
 
 check_for_updates() {
-    # 已检查过则跳过
     if [ -f "$UPDATE_CHECK_FLAG" ]; then
-        # 检查标记文件是否在 6 小时内（21600 秒）
         local flag_time
         flag_time=$(cat "$UPDATE_CHECK_FLAG" 2>/dev/null || echo "0")
         local now
         now=$(date +%s)
         local age=$((now - flag_time))
         if [ $age -lt 21600 ]; then
-            return 0  # 6 小时内已检查，跳过
+            return 0
         fi
     fi
 
-    # 写入标记（无论检查结果如何，本周期不再重复）
     date +%s > "$UPDATE_CHECK_FLAG" 2>/dev/null || true
 
-    # 读取本地版本
     local local_version="unknown"
     if [ -f "$VERSION_FILE" ]; then
         local_version=$(cat "$VERSION_FILE" | tr -d '[:space:]')
     fi
 
-    # 从 GitHub 获取最新版本（超时 3 秒，不阻塞正常使用）
     if command -v curl &>/dev/null; then
         local remote_version
         remote_version=$(curl -sf --max-time 3 \
@@ -204,37 +217,89 @@ check_for_updates() {
             | tr -d '[:space:]')
 
         if [ -n "$remote_version" ] && [ "$remote_version" != "$local_version" ]; then
-            # 有新版本，输出提示到 stderr（不干扰 hook 的 exit code 判断）
-            echo "" >&2
-            echo "┌─────────────────────────────────────────────────────────┐" >&2
-            echo "│  ⬆️  SkillGuard 新版本可用！                              │" >&2
-            echo "│                                                         │" >&2
-            echo "│  当前版本：v${local_version}                                      │" >&2
-            echo "│  最新版本：v${remote_version}                                      │" >&2
-            echo "│                                                         │" >&2
-            echo "│  更新命令：cd $(echo "$SCRIPT_DIR" | head -c 30) && bash update.sh  │" >&2
-            echo "│  查看更新内容：https://github.com/xuxianbang1993/SkillGuard/blob/main/CHANGELOG.md │" >&2
-            echo "└─────────────────────────────────────────────────────────┘" >&2
-            echo "" >&2
+            echo "[SkillGuard] 新版本 v${remote_version} 可用（当前 v${local_version}）" >&2
+            echo "[SkillGuard] 更新命令：cd $(echo "$SCRIPT_DIR" | head -c 40) && bash update.sh" >&2
         fi
     fi
 }
 
-# 异步检查（不阻塞主流程，后台运行）
-check_for_updates &
+# 异步检查（后台运行，所有输出到 stderr）
+check_for_updates >&2 2>&1 &
 UPDATE_PID=$!
-# 等待最多 3 秒，超时则放弃
-( sleep 3 && kill $UPDATE_PID 2>/dev/null ) &
-wait $UPDATE_PID 2>/dev/null || true
+( sleep 3 && kill "$UPDATE_PID" 2>/dev/null ) &
+wait "$UPDATE_PID" 2>/dev/null || true
+
+# ── 会话级 Docker Desktop 自动启动 ─────────────────────────────
+DOCKER_START_FLAG="$SG_TMPDIR/skillguard-docker-checked-$(id -u 2>/dev/null || echo 0)"
+
+auto_start_docker() {
+    if [ -f "$DOCKER_START_FLAG" ]; then
+        local flag_time
+        flag_time=$(cat "$DOCKER_START_FLAG" 2>/dev/null || echo "0")
+        local now
+        now=$(date +%s)
+        local age=$((now - flag_time))
+        if [ $age -lt 21600 ]; then
+            return 0
+        fi
+    fi
+    date +%s > "$DOCKER_START_FLAG" 2>/dev/null || true
+
+    if ! command -v docker &>/dev/null; then
+        echo "[SkillGuard] Docker 未安装。Layer 2/3 不可用。" >&2
+        echo "[SkillGuard] 请安装 Docker Desktop，首次安装后需重启电脑。" >&2
+        return 0
+    fi
+
+    if docker info &>/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "[SkillGuard] Docker 未运行，正在自动启动 Docker Desktop..." >&2
+    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+        local docker_exe=""
+        for candidate in \
+            "C:/Program Files/Docker/Docker/Docker Desktop.exe" \
+            "C:/Program Files (x86)/Docker/Docker/Docker Desktop.exe"; do
+            if [ -f "$candidate" ]; then
+                docker_exe="$candidate"
+                break
+            fi
+        done
+        if [ -n "$docker_exe" ]; then
+            "$docker_exe" &>/dev/null &
+            echo "[SkillGuard] Docker Desktop 已在后台启动。" >&2
+        else
+            echo "[SkillGuard] 未找到 Docker Desktop，请手动启动。" >&2
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        open -a "Docker" 2>/dev/null && \
+            echo "[SkillGuard] Docker Desktop 已在后台启动。" >&2 || \
+            echo "[SkillGuard] 无法启动 Docker Desktop，请手动启动。" >&2
+    else
+        # Linux: 不使用 sudo（会挂起等待密码），尝试无 sudo 或跳过
+        if command -v systemctl &>/dev/null; then
+            systemctl start docker 2>/dev/null && \
+                echo "[SkillGuard] Docker 服务已启动。" >&2 || \
+                echo "[SkillGuard] 无法启动 Docker 服务（可能需要 sudo），请手动运行：sudo systemctl start docker" >&2
+        fi
+    fi
+}
+
+# 异步启动（所有输出到 stderr，5 秒超时）
+auto_start_docker >&2 2>&1 &
+DOCKER_PID=$!
+( sleep 5 && kill "$DOCKER_PID" 2>/dev/null ) &
+wait "$DOCKER_PID" 2>/dev/null || true
 
 # ── 读取 Hook 输入（JSON from stdin）────────────────────────
 INPUT=$(cat)
 
-# 提取 Bash 命令（需要 jq；若无 jq 则用 grep 降级）
+# 提取 Bash 命令（需要 jq；若无 jq 则用 sed 降级）
 if command -v jq &>/dev/null; then
     BASH_CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 else
-    BASH_CMD=$(echo "$INPUT" | grep -oP '"command"\s*:\s*"\K[^"]+' | head -1)
+    BASH_CMD=$(echo "$INPUT" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 fi
 
 # 若不是 Bash 工具或无法解析，直接放行
@@ -242,102 +307,107 @@ if [ -z "$BASH_CMD" ]; then
     exit 0
 fi
 
-# ── 检测是否为技能安装命令 ───────────────────────────────────
+# ── SkillGuard 自身命令白名单（精确路径匹配）──────────────────
+# 安全：只放行确实调用 SkillGuard 目录下特定脚本的命令
+BASH_CMD_NORM=$(echo "$BASH_CMD" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+
+is_skillguard_self_command() {
+    local cmd_lower="$1"
+    local sg_dir_lower="$SCRIPT_DIR_LOWER"
+
+    # 精确匹配：命令必须以 bash/sh + SkillGuard 目录路径 + 允许的脚本名开头
+    for script_name in "一键配置.sh" "update.sh" "generate-checksums.sh" "run-tests.sh" "uninstall.sh"; do
+        local script_lower
+        script_lower=$(echo "$script_name" | tr '[:upper:]' '[:lower:]')
+        # 匹配 "bash /path/to/skillguard/script.sh" 或 "cd /path/to/skillguard && bash script.sh"
+        if echo "$cmd_lower" | grep -qF "${sg_dir_lower}/${script_lower}"; then
+            return 0
+        fi
+    done
+
+    # 精确匹配：python/jq 操作 settings.json 且命令中引用了 SkillGuard 目录路径
+    if echo "$cmd_lower" | grep -qF "$sg_dir_lower"; then
+        if echo "$cmd_lower" | grep -qE 'python.*settings.*json|jq.*settings.*json'; then
+            return 0
+        fi
+    fi
+
+    # 精确匹配：删除 SkillGuard 目录（必须是精确路径，不是包含字符串）
+    if echo "$cmd_lower" | grep -qE "rm[[:space:]]+(-r|-rf|-f)[[:space:]]+[\"']?${sg_dir_lower}[\"']?[[:space:]]*$"; then
+        return 0
+    fi
+
+    return 1
+}
+
+if is_skillguard_self_command "$BASH_CMD_NORM"; then
+    exit 0
+fi
+
+# ── 检测是否为技能安装命令（大小写不敏感）────────────────────
 is_skill_install() {
     local cmd="$1"
-    # 覆盖所有已知的技能安装方式
-    echo "$cmd" | grep -qE \
-        'npx\s+skills@|npx\s+clawhub@|claude\s+skill\s+add|skills\s+add|npm\s+exec\s+skills@|yarn\s+dlx\s+skills@|pnpm\s+dlx\s+skills@|node_modules/.bin/skills\s+add|npx\s+-y\s+skills@|npx\s+--yes\s+skills@|npx\s+-y\s+clawhub@|npx\s+--yes\s+clawhub@'
+    echo "$cmd" | grep -qiE \
+        'npx[[:space:]]+skills@|npx[[:space:]]+clawhub@|claude[[:space:]]+skill[[:space:]]+add|skills[[:space:]]+add|npm[[:space:]]+exec[[:space:]]+skills@|yarn[[:space:]]+dlx[[:space:]]+skills@|pnpm[[:space:]]+dlx[[:space:]]+skills@|node_modules/.bin/skills[[:space:]]+add|npx[[:space:]]+-y[[:space:]]+skills@|npx[[:space:]]+--yes[[:space:]]+skills@|npx[[:space:]]+-y[[:space:]]+clawhub@|npx[[:space:]]+--yes[[:space:]]+clawhub@'
 }
 
 if ! is_skill_install "$BASH_CMD"; then
-    # 不是技能安装命令，放行
     exit 0
 fi
 
 # ── 解析技能来源 ─────────────────────────────────────────────
-# 支持格式：
-#   npx skills@latest add anthropics/skills@brainstorming -g -y
-#   npx clawhub@latest install some-skill
-#   npx skills@latest add owner/repo@skill-name
-
 SKILL_SOURCE=""
 SKILL_NAME=""
 
-if echo "$BASH_CMD" | grep -qE 'skills@.*add\s+'; then
-    SKILL_SOURCE=$(echo "$BASH_CMD" | grep -oP '(?<=add\s)[^\s]+' | head -1)
-    SKILL_NAME=$(echo "$SKILL_SOURCE" | grep -oP '[^@]+$' | head -1)
-elif echo "$BASH_CMD" | grep -qE 'clawhub@.*install\s+'; then
-    SKILL_SOURCE=$(echo "$BASH_CMD" | grep -oP '(?<=install\s)[^\s]+' | head -1)
+if echo "$BASH_CMD" | grep -qiE 'skills@.*add[[:space:]]'; then
+    SKILL_SOURCE=$(echo "$BASH_CMD" | sed -n 's/.*add[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
+    SKILL_NAME=$(echo "$SKILL_SOURCE" | sed 's/.*@//' | head -1)
+elif echo "$BASH_CMD" | grep -qiE 'clawhub@.*install[[:space:]]'; then
+    SKILL_SOURCE=$(echo "$BASH_CMD" | sed -n 's/.*install[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
     SKILL_NAME="$SKILL_SOURCE"
 fi
 
 if [ -z "$SKILL_SOURCE" ]; then
-    echo "[SkillGuard] 无法解析技能来源，请手动审查后安装。"
-    echo "原始命令：$BASH_CMD"
-    exit 1
+    echo "[SkillGuard] 无法解析技能来源，请手动审查后安装。" >&2
+    echo "[SkillGuard] 原始命令：$BASH_CMD" >&2
+    exit 2
 fi
 
 # ── 快速通道判断（官方技能跳过审查）───────────────────────────
 is_trusted_source() {
     local src="$1"
-    # 精确匹配组织/仓库名（不是前缀匹配）
     local org_repo="${src%%@*}"
     local skill_name="${src##*@}"
 
-    # 验证技能名仅包含安全字符
     if [[ ! "$skill_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        return 1  # 技能名包含非法字符，不可信
+        return 1
     fi
 
-    # 精确白名单（仅允许已确认的官方组织/仓库）
     case "$org_repo" in
         "anthropics/skills")
-            return 0  # Anthropic 官方技能
+            return 0
             ;;
         "vercel-labs/ai-sdk-skills")
-            return 0  # Vercel Labs 官方技能
+            return 0
             ;;
     esac
-    return 1  # 不在白名单中，不可信
+    return 1
 }
 
 if is_trusted_source "$SKILL_SOURCE"; then
-    echo ""
-    echo "╔══════════════════════════════════════════════════════╗"
-    echo "║  ✅ 官方技能快速通道                                   ║"
-    echo "╠══════════════════════════════════════════════════════╣"
-    echo "║  来源：$SKILL_SOURCE"
-    echo "║  判定：anthropics / vercel-labs 官方，跳过隔离审查      ║"
-    echo "╚══════════════════════════════════════════════════════╝"
-    echo ""
-    # 放行原命令（不拦截）
+    echo "[SkillGuard] 官方技能快速通道：$SKILL_SOURCE，跳过审查。" >&2
     exit 0
 fi
 
 # ── 审查通过凭证检查（防止重复审查死循环）──────────────────────
 if has_valid_approval "$SKILL_SOURCE"; then
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║  ✅ 审查通过凭证有效，放行安装（一次性凭证已消费）            ║"
-    echo "╠══════════════════════════════════════════════════════════╣"
-    echo "║  来源：$SKILL_SOURCE"
-    echo "║  状态：已通过隔离审查，凭证已使用并删除，再次安装需重新审查    ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo ""
-    exit 0  # 放行原命令
+    echo "[SkillGuard] 审查凭证有效，放行安装：$SKILL_SOURCE（凭证已消费）" >&2
+    exit 0
 fi
 
 # ── 非官方来源：启动隔离审查流水线 ──────────────────────────────
-echo ""
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  🔒 SkillGuard：拦截到技能安装请求                         ║"
-echo "╠══════════════════════════════════════════════════════════╣"
-echo "║  来源：$SKILL_SOURCE"
-echo "║  判定：非官方来源，启动隔离审查流水线                        ║"
-echo "║  原安装命令已暂停，待审查通过后再由你决定是否释放到本机        ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-echo ""
+echo "[SkillGuard] 拦截到技能安装请求：$SKILL_SOURCE" >&2
+echo "[SkillGuard] 非官方来源，启动隔离审查流水线..." >&2
 
 # 调用审查主控脚本
 bash "$AUDIT_SCRIPT" "$SKILL_SOURCE" "$SKILL_NAME"
@@ -348,37 +418,23 @@ case $AUDIT_EXIT in
     0)
         # SAFE：审查通过，颁发凭证
         grant_approval "$SKILL_SOURCE"
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════╗"
-        echo "║  ✅ 审查通过，已颁发安装凭证                               ║"
-        echo "╠══════════════════════════════════════════════════════════╣"
-        echo "║  来源：$SKILL_SOURCE"
-        echo "║  凭证类型：一次性（仅限本次安装放行）                       ║"
-        echo "║  下次安装同一技能将重新触发完整审查                          ║"
-        echo "╠══════════════════════════════════════════════════════════╣"
-        echo "║  请告知 Claude：「继续安装」以执行原始安装命令               ║"
-        echo "╚══════════════════════════════════════════════════════════╝"
-        echo ""
-        # 本次仍拦截（审查过程中原命令已被暂停）
-        # 用户确认后 Claude 重新执行 → 凭证有效 → 自动放行
-        exit 1
+        echo "[SkillGuard] 审查通过，已颁发安装凭证：$SKILL_SOURCE" >&2
+        echo "[SkillGuard] 请告知 Claude「继续安装」以执行原始命令（凭证一次性）" >&2
+        # 本次仍拦截，用户确认后 Claude 重新执行 → 凭证有效 → 自动放行
+        exit 2
         ;;
     3)
         # WARN：有警告，等待用户决定
-        echo ""
-        echo "║  用户确认「释放」后，Claude 重新执行安装命令即可              ║"
-        echo ""
-        # 用户说"释放"后，需要手动颁发凭证
-        # Claude 应执行：echo $(date +%s) > .approved/<hash>
-        # 然后重新执行 npx 命令
-        echo "[SkillGuard] 若用户确认释放，请执行以下命令颁发凭证："
-        echo "  echo \$(date +%s) > \"$APPROVED_DIR/$(echo -n "$SKILL_SOURCE" | sha256sum | cut -d' ' -f1)\""
-        exit 1
+        echo "[SkillGuard] 审查有警告，等待用户确认。" >&2
+        echo "[SkillGuard] 用户确认「释放」后，Claude 重新执行安装命令即可。" >&2
+        local approval_hash
+        approval_hash=$(echo -n "$SKILL_SOURCE" | compute_sha256 /dev/stdin 2>/dev/null || echo -n "$SKILL_SOURCE" | sha256sum 2>/dev/null | cut -d' ' -f1)
+        echo "[SkillGuard] 手动颁发凭证：echo \$(date +%s) > \"$APPROVED_DIR/$approval_hash\"" >&2
+        exit 2
         ;;
     *)
         # FAIL / MALICIOUS：拒绝安装
-        echo ""
-        echo "⛔ 安装已被拒绝，不颁发凭证。"
-        exit 1
+        echo "[SkillGuard] 安装已被拒绝：$SKILL_SOURCE" >&2
+        exit 2
         ;;
 esac

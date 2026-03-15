@@ -4,6 +4,49 @@
 
 ---
 
+## [5.6] - 2026-03-15
+
+### 安全修复
+- **白名单注释绕过**（CRITICAL）：自身命令白名单从字符串包含改为精确 SkillGuard 目录路径匹配，防止 `cmd #skillguard` 绕过
+- **rm 白名单过宽**（CRITICAL）：删除命令只匹配精确的 SkillGuard 安装目录路径
+- **路径遍历绕过**（HIGH）：write.sh 路径规范化增加 `..` 和 `.` 解析，防止 `../../.claude/settings.json` 绕过
+- **Python 路径注入**（MEDIUM）：uninstall.sh 的 Python 代码改用 sys.argv 传递路径，防止单引号注入
+
+### 修复
+- **VERSION_FILE 未定义崩溃**（CRITICAL）：`VERSION_FILE` 定义从第 191 行移到第 31 行（`verify_self_integrity()` 之前）
+- **stdout 污染**（P0）：所有 echo 输出改为 stderr（`>&2`），stdout 保持纯净（Claude Code 要求 stdout 为纯 JSON）
+- **exit 1→exit 2**：所有阻塞操作从 `exit 1` 改为 `exit 2`（Claude Code 官方推荐的阻塞 exit code）
+- **macOS sha256sum**（HIGH）：新增 `compute_sha256()` 函数，自动 fallback 到 `shasum -a 256`
+- **is_skill_install 大小写**（HIGH）：技能安装检测改为 `grep -qiE`（大小写不敏感）
+- **sed BSD 兼容**（HIGH）：所有 `sed` 使用 POSIX 兼容语法（`[[:space:]]` 替代 `\s`，`[[:space:]]*` 替代 `\+`）
+- **Linux Docker sudo 挂起**（MEDIUM）：移除 `sudo systemctl`，改为无 sudo 尝试，失败时提示用户手动操作
+- **/tmp 跨平台**（MEDIUM）：使用 `${TMPDIR:-/tmp}` 替代硬编码 `/tmp`
+- **hook 超时**（P1）：Bash hook 配置添加 `timeout: 300000`（300 秒），防止审查流水线被 60 秒默认超时中断
+- **EXIT trap**（LOW）：gate.sh 添加 `trap cleanup EXIT` 清理孤儿后台进程
+- **set -e 移除**（HIGH）：gate.sh 改用 `set -uo pipefail`（不含 `-e`），防止后台进程导致意外退出
+
+### 改进
+- write.sh 的 Edit 工具现在提取 `old_string` 用于精确的卸载意图识别
+- gate.sh `is_skillguard_self_command()` 函数封装白名单逻辑，更易维护
+
+---
+
+## [5.5] - 2026-03-15
+
+### 修复
+- **Bug #1 首次安装拦截**：`grep -P`（Perl 正则）在 Windows 中文系统 GBK locale 下报错，改为 `sed` 兼容写法
+- **Bug #1 Python 兼容**：`一键配置.sh` 和 `update.sh` 的 `python3` 改为 `python3/python` 自动探测（Windows Git Bash 只有 `python`）
+- **Bug #2 Docker 自动启动**：会话首次触发时自动检测并拉起 Docker Desktop（已安装未运行→自动启动；未安装→提示安装并说明需重启电脑）
+- **Bug #3 卸载被自身拦截**：`gate.sh` 添加 SkillGuard 自身命令白名单放行；`write.sh` 识别卸载 settings.json 写入并放行
+- **远程校验误判**：新版本推送后，旧版本用户不再因远程哈希不匹配而误判为"文件被篡改"，改为提示更新
+- **版本提示可见性**：更新提示从 stderr 改为 stdout，确保 Claude Code hook 输出对用户可见
+
+### 新功能
+- `uninstall.sh` 一键卸载脚本：移除 hooks + 清理临时文件 + 提示删除目录
+- `gate.sh` SkillGuard 自身命令白名单：安装/更新/卸载相关命令自动放行
+
+---
+
 ## [5.4] - 2026-03-15
 
 ### 新功能

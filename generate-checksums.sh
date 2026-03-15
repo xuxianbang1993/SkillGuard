@@ -17,6 +17,7 @@ CORE_FILES=(
     "run-tests.sh"
     "Dockerfile.skillguard"
     "update.sh"
+    "uninstall.sh"
 )
 
 echo "=== SkillGuard 校验和生成 ==="

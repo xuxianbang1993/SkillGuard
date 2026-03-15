@@ -234,13 +234,21 @@ fi
 # ── 2.7 Python3 ──────────────────────────────────────────────
 ENV_TOTAL=$((ENV_TOTAL+1))
 PYTHON_OK=0
+PYTHON_CMD=""
 if command -v python3 &>/dev/null; then
-    PY_VER=$(python3 --version 2>/dev/null || echo "unknown")
-    log_ok "Python3：$PY_VER"
+    PYTHON_CMD="python3"
+elif command -v python &>/dev/null; then
+    # Windows Git Bash 下通常只有 python（不是 python3）
+    PYTHON_CMD="python"
+fi
+
+if [ -n "$PYTHON_CMD" ]; then
+    PY_VER=$($PYTHON_CMD --version 2>&1 || echo "unknown")
+    log_ok "Python：$PY_VER（命令：$PYTHON_CMD）"
     PYTHON_OK=1
     ENV_SCORE=$((ENV_SCORE+1))
 else
-    log_warn "Python3：未安装"
+    log_warn "Python：未安装"
     log_info "以下检测将降级或跳过：零宽字符、Unicode Tag、BiDi、Homoglyph"
     WARNINGS="${WARNINGS}\n- Python3 未安装，部分 Layer 1 高级检测降级"
 fi
@@ -309,8 +317,16 @@ mkdir -p "$CLAUDE_DIR" 2>/dev/null || true
 GATE_CMD="bash $SG_PATH/skillguard-gate.sh"
 WRITE_CMD="bash $SG_PATH/skillguard-write.sh"
 
+# 确定 Python 命令（兼容 Windows Git Bash）
+PY_CMD=""
 if command -v python3 &>/dev/null; then
-    python3 -c "
+    PY_CMD="python3"
+elif command -v python &>/dev/null; then
+    PY_CMD="python"
+fi
+
+if [ -n "$PY_CMD" ]; then
+    $PY_CMD -c "
 import json, os, sys
 
 settings_file = sys.argv[1]
@@ -330,7 +346,7 @@ if os.path.exists(settings_file):
 
 sg_hooks = {
     'PreToolUse': [
-        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': gate_cmd}]},
+        {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': gate_cmd, 'timeout': 300000}]},
         {'matcher': 'Write', 'hooks': [{'type': 'command', 'command': write_cmd}]},
         {'matcher': 'Edit', 'hooks': [{'type': 'command', 'command': write_cmd}]}
     ]
@@ -432,8 +448,8 @@ for f in skillguard-gate.sh skillguard-audit.sh skillguard-write.sh run-tests.sh
 done
 
 # 验证 settings.json
-if command -v python3 &>/dev/null; then
-    python3 -c "import json; json.load(open('$SETTINGS_FILE'))" 2>/dev/null && \
+if [ -n "$PY_CMD" ]; then
+    $PY_CMD -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" "$SETTINGS_FILE" 2>/dev/null && \
         log_ok "settings.json 格式有效" || \
         { log_fail "settings.json 格式无效"; ALL_OK=0; }
 fi
