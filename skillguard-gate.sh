@@ -360,12 +360,37 @@ fi
 SKILL_SOURCE=""
 SKILL_NAME=""
 
+# 通用提取：取 add/install 后第一个非 flag 参数
+_sg_extract_after() {
+    local verb="$1"
+    echo "$BASH_CMD" | sed "s/.*${verb}[[:space:]][[:space:]]*//" | \
+        tr ' ' '\n' | grep -v '^-' | head -1
+}
+
+# 按优先级匹配多种安装命令格式
 if echo "$BASH_CMD" | grep -qiE 'skills@.*add[[:space:]]'; then
-    SKILL_SOURCE=$(echo "$BASH_CMD" | sed -n 's/.*add[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
-    SKILL_NAME=$(echo "$SKILL_SOURCE" | sed 's/.*@//' | head -1)
+    # npx skills@latest add <source>
+    SKILL_SOURCE=$(_sg_extract_after "add")
 elif echo "$BASH_CMD" | grep -qiE 'clawhub@.*install[[:space:]]'; then
-    SKILL_SOURCE=$(echo "$BASH_CMD" | sed -n 's/.*install[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)
-    SKILL_NAME="$SKILL_SOURCE"
+    # npx clawhub@latest install <source>
+    SKILL_SOURCE=$(_sg_extract_after "install")
+elif echo "$BASH_CMD" | grep -qiE 'skills?[[:space:]]+add[[:space:]]'; then
+    # claude skills add <source> / skills add <source>
+    SKILL_SOURCE=$(_sg_extract_after "add")
+fi
+
+# 从来源提取技能名称（兼容 URL / owner/repo / owner/repo@skill）
+if [ -n "$SKILL_SOURCE" ]; then
+    _sg_norm=$(echo "$SKILL_SOURCE" | \
+        sed 's|https\?://github\.com/||' | \
+        sed 's|https\?://clawhub\.ai/||' | \
+        sed 's|\.git$||')
+    if echo "$_sg_norm" | grep -q '@'; then
+        SKILL_NAME=$(echo "$_sg_norm" | sed 's/.*@//')
+    else
+        SKILL_NAME=$(echo "$_sg_norm" | sed 's|.*/||')
+    fi
+    unset _sg_norm
 fi
 
 if [ -z "$SKILL_SOURCE" ]; then

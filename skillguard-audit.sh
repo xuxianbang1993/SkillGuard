@@ -35,9 +35,9 @@ if [ -z "$SKILL_SOURCE" ]; then
     echo "❌ 用法：bash skillguard-audit.sh <skill-source> <skill-name>"
     exit 1
 fi
-if [[ ! "$SKILL_SOURCE" =~ ^[a-zA-Z0-9_./@-]+$ ]]; then
+if [[ ! "$SKILL_SOURCE" =~ ^[a-zA-Z0-9_./@:=-]+$ ]]; then
     echo "❌ 技能来源包含非法字符，拒绝执行：$SKILL_SOURCE"
-    echo "   仅允许：字母、数字、_  .  /  @  -"
+    echo "   仅允许：字母、数字、_  .  /  @  :  =  -"
     exit 1
 fi
 if [[ ! "$SKILL_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
@@ -117,7 +117,12 @@ fi
 # ── 临时目录（唯一、有边界）─────────────────────────────────
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 RAND=$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 4)
-AUDIT_TMP_BASE="/tmp"
+# Windows Git Bash: /tmp 不映射到 Docker 可挂载路径，改用 $HOME 下目录
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+    AUDIT_TMP_BASE="$HOME/.skillguard-tmp"
+else
+    AUDIT_TMP_BASE="/tmp"
+fi
 AUDIT_TMP="${AUDIT_TMP_BASE}/skillguard-audit-${TIMESTAMP}-${RAND}"
 SKILL_FILES="${AUDIT_TMP}/skill-files"
 
@@ -131,7 +136,6 @@ L1_DETAIL=""
 L2_DETAIL=""
 L3_DETAIL=""
 FINAL_VERDICT="UNKNOWN"
-SANDBOX_NAME=""
 
 # ── 工具函数 ─────────────────────────────────────────────────
 log_section() { echo ""; echo "━━━ $1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; }
@@ -158,17 +162,48 @@ safe_delete_tmp() {
     echo "   🗑️  临时目录已安全删除：$target"
 }
 
-cleanup_sandbox() {
-    if [ -n "$SANDBOX_NAME" ]; then
-        log_section "清理点 B：销毁 Docker Sandbox"
-        docker sandbox rm "$SANDBOX_NAME" 2>/dev/null && \
-            echo "   🗑️  Docker Sandbox 已销毁：$SANDBOX_NAME" || \
-            echo "   ⚠️  Sandbox 销毁失败或已不存在"
-    fi
-}
+# cleanup_sandbox 已移除 — Step 2 改用 docker run --rm（自动清理）
+# 不再需要手动清理 Sandbox
 
 # cleanup_windows_sandbox 已移除 — Windows Home 不支持 Windows Sandbox
 # Layer 3 已全面迁移到 Docker Sandbox microVM（v4.0）
+
+# ── Sandbox 降级：GitHub 克隆到临时目录（不在主机安装）────────────
+fetch_skill_via_github() {
+    # 从 SKILL_SOURCE 提取 GitHub repo slug（兼容 URL 和 owner/repo 格式）
+    local repo_slug
+    repo_slug=$(echo "$SKILL_SOURCE" | \
+        sed 's|https\?://github\.com/||' | \
+        sed 's|https\?://clawhub\.ai/||' | \
+        sed 's|\.git$||' | \
+        sed 's/@.*//')
+
+    if ! echo "$repo_slug" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
+        echo "   ❌ 无法识别仓库格式：$SKILL_SOURCE（需要 owner/repo）"
+        safe_delete_tmp "$AUDIT_TMP"
+        exit 1
+    fi
+
+    echo "   📥 降级方案：克隆仓库到临时目录（仅审查，不安装到主机）：$repo_slug"
+
+    if command -v gh &>/dev/null; then
+        if gh repo clone "$repo_slug" "$SKILL_FILES" -- --depth=1 -q 2>/dev/null; then
+            echo "   ✅ GitHub 克隆成功（gh CLI）"
+            return 0
+        fi
+    fi
+
+    if command -v git &>/dev/null; then
+        if git clone --depth=1 -q "https://github.com/$repo_slug.git" "$SKILL_FILES" 2>/dev/null; then
+            echo "   ✅ GitHub 克隆成功（git）"
+            return 0
+        fi
+    fi
+
+    echo "   ❌ GitHub 克隆失败（gh 和 git 均不可用或网络错误）"
+    safe_delete_tmp "$AUDIT_TMP"
+    exit 1
+}
 
 # ── 来源风险分级 ─────────────────────────────────────────────
 classify_risk() {
@@ -238,50 +273,60 @@ if [ -d "$HOME/.claude/hooks" ]; then
 fi
 echo "   🔐 SHA256 基线已建立：$BASELINE_COUNT 个文件"
 
-# ── STEP 2：Docker Sandbox 安装技能 ──────────────────────────
-log_section "Step 2：Docker Sandbox 安装技能（microVM 隔离）"
+# ── STEP 2：隔离安装技能（Docker 容器 → GitHub 克隆降级）──────
+log_section "Step 2：隔离安装技能并提取文件"
 
-if command -v docker &>/dev/null && docker sandbox ls &>/dev/null 2>&1; then
-    SANDBOX_NAME="skill-audit-${SKILL_NAME}-${TIMESTAMP}"
-    echo "   启动 microVM：$SANDBOX_NAME"
+STEP2_OK=false
 
-    # 在 Docker Sandbox 内安装技能
-    docker sandbox run \
-        --name "$SANDBOX_NAME" \
-        --detach \
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    echo "   🐳 使用 Docker 容器隔离安装（volume mount 提取文件）"
+
+    # docker run + volume mount：容器内安装技能，复制到挂载目录
+    # MSYS_NO_PATHCONV：防止 Git Bash 转换 -v 路径中的 /output
+    STEP2_OUTPUT=$(MSYS_NO_PATHCONV=1 docker run --rm \
+        --memory 512m \
+        --pids-limit 200 \
+        -e "SKILL_SOURCE=$SKILL_SOURCE" \
+        -e "SKILL_NAME=$SKILL_NAME" \
+        -v "$SKILL_FILES:/output" \
         node:20-slim \
-        bash -c "npm install -g @anthropic-ai/claude-code 2>/dev/null; \
-                 npx skills@latest add '$SKILL_SOURCE' -g -y 2>&1; \
-                 echo 'INSTALL_DONE'" 2>/dev/null
+        bash -c '
+            npm install -g @anthropic-ai/claude-code 2>/dev/null
+            npx skills@latest add "$SKILL_SOURCE" -g -y 2>&1
 
-    # 等待安装完成（最多60秒）
-    WAIT=0
-    while [ $WAIT -lt 60 ]; do
-        if docker sandbox logs "$SANDBOX_NAME" 2>/dev/null | grep -q 'INSTALL_DONE'; then
-            break
-        fi
-        sleep 2; WAIT=$((WAIT+2))
-    done
+            # 搜索技能安装路径并复制到挂载目录
+            FOUND=0
+            for search_dir in \
+                "$HOME/.claude/.agents/skills/$SKILL_NAME" \
+                "$HOME/.agents/skills/$SKILL_NAME" \
+                "$HOME/.claude/skills/$SKILL_NAME"; do
+                if [ -d "$search_dir" ]; then
+                    cp -r "$search_dir"/* /output/ 2>/dev/null && FOUND=1 && break
+                fi
+            done
 
-    # 同步文件到临时目录
-    docker sandbox cp \
-        "$SANDBOX_NAME:/root/.claude/.agents/skills/$SKILL_NAME/" \
-        "$SKILL_FILES/" 2>/dev/null || \
-    docker sandbox cp \
-        "$SANDBOX_NAME:/root/.agents/skills/$SKILL_NAME/" \
-        "$SKILL_FILES/" 2>/dev/null || \
-        echo "   ⚠️  Sandbox 文件同步失败，尝试降级到本地临时安装"
+            # 兜底：全局搜索 skills 目录
+            if [ $FOUND -eq 0 ]; then
+                SKILL_DIR=$(find / -type d -name "$SKILL_NAME" -path "*/skills/*" 2>/dev/null | head -1)
+                if [ -n "$SKILL_DIR" ]; then
+                    cp -r "$SKILL_DIR"/* /output/ 2>/dev/null && FOUND=1
+                fi
+            fi
 
-    echo "   ✅ 技能文件已同步到临时目录（主机未安装）"
-else
-    # Docker Sandbox 不可用时中止审查（绝不在主机直接执行）
-    echo "   ❌ Docker Sandbox 不可用，无法安全安装技能进行审查"
-    echo "   请确保以下条件满足后重试："
-    echo "     1. Docker Desktop 已安装并运行"
-    echo "     2. Docker Sandbox 可用（docker sandbox ls）"
-    echo "     3. Docker Desktop 版本 ≥ 4.44.3（CVE-2025-9074 修复）"
-    safe_delete_tmp "$AUDIT_TMP"
-    exit 1
+            [ $FOUND -eq 1 ] && echo "COPY_OK" || echo "COPY_FAILED"
+        ' 2>&1) || true
+
+    if echo "$STEP2_OUTPUT" | grep -q 'COPY_OK'; then
+        echo "   ✅ 技能文件已从 Docker 容器提取到临时目录"
+        STEP2_OK=true
+    else
+        echo "   ⚠️  Docker 容器内文件提取失败，降级到 GitHub 克隆"
+        echo "$STEP2_OUTPUT" | tail -5 | sed 's/^/      /'
+    fi
+fi
+
+if ! $STEP2_OK; then
+    fetch_skill_via_github
 fi
 
 # 检查文件是否存在
@@ -657,16 +702,18 @@ fi
 if [ "$SOURCE_RISK" = "EXTREME" ] || [ "$SOURCE_RISK" = "HIGH" ] || \
    [ "$L1_RESULT" = "WARN" ] || [ "$L1_RESULT" = "FAIL" ]; then
 
-    log_section "Layer 3：Docker Sandbox microVM 动态执行测试"
+    log_section "Layer 3：Docker 容器动态执行测试"
 
-    if command -v docker &>/dev/null && docker sandbox ls &>/dev/null 2>&1; then
-        L3_SANDBOX="skill-l3-${SKILL_NAME}-${TIMESTAMP}"
-        echo "   🔒 启动 microVM（独立内核隔离）：$L3_SANDBOX"
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo "   🔒 启动隔离容器进行动态行为监测"
 
-        # 创建隔离 microVM，在内部安装技能并收集行为日志
-        docker sandbox run \
-            --name "$L3_SANDBOX" \
-            --detach \
+        # 使用 docker run 进行动态测试（容器隔离 + 安全加固）
+        L3_LOGS=$(MSYS_NO_PATHCONV=1 docker run --rm \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 100 \
+            --memory 256m \
+            -e "SKILL_SOURCE=$SKILL_SOURCE" \
             node:20-slim \
             bash -c '
                 echo "=== L3 DYNAMIC TEST START ==="
@@ -678,7 +725,7 @@ if [ "$SOURCE_RISK" = "EXTREME" ] || [ "$SOURCE_RISK" = "HIGH" ] || \
 
                 echo "--- Installing skill ---"
                 npm install -g @anthropic-ai/claude-code 2>/dev/null
-                npx skills@latest add "'"$SKILL_SOURCE"'" -g -y 2>&1 || echo "INSTALL_FAILED"
+                npx skills@latest add "$SKILL_SOURCE" -g -y 2>&1 || echo "INSTALL_FAILED"
 
                 echo "--- Post-install checks ---"
                 echo ">> New files:"
@@ -699,23 +746,11 @@ if [ "$SOURCE_RISK" = "EXTREME" ] || [ "$SOURCE_RISK" = "HIGH" ] || \
                 cat /root/.profile 2>/dev/null | tail -5
 
                 echo "=== L3 DYNAMIC TEST END ==="
-            ' 2>/dev/null
-
-        # 等待测试完成（最多 120 秒）
-        WAIT=0
-        while [ $WAIT -lt 120 ]; do
-            if docker sandbox logs "$L3_SANDBOX" 2>/dev/null | grep -q 'L3 DYNAMIC TEST END'; then
-                break
-            fi
-            sleep 3; WAIT=$((WAIT+3))
-        done
-
-        # 收集日志
-        L3_LOGS=$(docker sandbox logs "$L3_SANDBOX" 2>/dev/null || echo "LOG_FETCH_FAILED")
+            ' 2>&1) || L3_LOGS="DOCKER_RUN_FAILED"
 
         # 分析行为
         L3_ALERTS=""
-        if echo "$L3_LOGS" | grep -qiE 'INSTALL_FAILED'; then
+        if echo "$L3_LOGS" | grep -qiE 'INSTALL_FAILED|DOCKER_RUN_FAILED'; then
             L3_ALERTS="${L3_ALERTS}[安装失败] "
         fi
         if echo "$L3_LOGS" | grep -qiE 'curl|wget|nc\s|ncat|python.*http'; then
@@ -727,11 +762,6 @@ if [ "$SOURCE_RISK" = "EXTREME" ] || [ "$SOURCE_RISK" = "HIGH" ] || \
         if echo "$L3_LOGS" | grep -qiE 'crontab.*-e|systemctl|\.bashrc.*>>' ; then
             L3_ALERTS="${L3_ALERTS}[持久化行为] "
         fi
-
-        # 销毁 microVM
-        docker sandbox rm "$L3_SANDBOX" 2>/dev/null && \
-            echo "   🗑️  microVM 已销毁：$L3_SANDBOX（零残留）" || \
-            echo "   ⚠️  microVM 销毁失败，请手动执行：docker sandbox rm $L3_SANDBOX"
 
         if [ -n "$L3_ALERTS" ]; then
             L3_RESULT="WARN"
@@ -746,8 +776,7 @@ if [ "$SOURCE_RISK" = "EXTREME" ] || [ "$SOURCE_RISK" = "HIGH" ] || \
         fi
     else
         L3_RESULT="SKIP"
-        log_warn "Docker Sandbox 不可用，跳过 Layer 3 动态测试"
-        log_warn "请确保 Docker Desktop ≥ 4.44.3 且已启用 Sandbox 功能"
+        log_warn "Docker 不可用，跳过 Layer 3 动态测试"
     fi
 fi
 
@@ -831,8 +860,7 @@ case "$FINAL_VERDICT" in
         [ -n "$L1_DETAIL" ] && printf "║  L1 威胁：%-46s║\n" "$L1_DETAIL"
         echo "╚══════════════════════════════════════════════════════════╝"
         echo ""
-        # 清理点 B：销毁安装用 Sandbox
-        cleanup_sandbox
+        # 清理点 B：docker run --rm 自动清理，无需额外操作
         echo ""
         echo "⛔ 技能 [$SKILL_NAME] 被判定为恶意，已拒绝安装并清除所有隔离副本。"
         exit 2

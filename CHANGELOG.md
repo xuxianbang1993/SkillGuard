@@ -4,6 +4,21 @@
 
 ---
 
+## [5.6.3] - 2026-03-15
+
+### 修复
+- **`docker sandbox cp` 不存在**（CRITICAL）：`docker sandbox` 没有 `cp` 子命令，且 `docker sandbox run` 不接受镜像名参数（只接受 `claude`/`shell` 等 agent 名），导致 Step 2 文件提取和 Layer 3 动态测试全部静默失败。Step 2 改用 `docker run --rm -v` volume mount 提取文件，Layer 3 改用 `docker run` + 安全加固参数
+- **gate.sh 来源解析不完整**（HIGH）：仅处理 `npx skills@latest add` 格式，缺少 `claude skills add`、`https://github.com/` URL、`https://clawhub.ai/` URL 等格式。新增通用提取函数，支持 9 种安装命令格式
+- **SKILL_NAME 提取错误**（HIGH）：`owner/repo` 格式返回整个字符串（含 `/`），导致 audit.sh 输入验证直接拒绝。修复为仅提取最后一段（repo 名）
+- **Windows Git Bash 路径不兼容 Docker**（HIGH）：`/tmp` 在 Git Bash 下不映射到 Docker Desktop 可挂载路径。Windows 下临时目录改用 `$HOME/.skillguard-tmp/`，所有 `docker run` 加 `MSYS_NO_PATHCONV=1`
+- **audit.sh 输入验证过严**：不允许 URL 中的 `:` 字符，导致 `https://` 格式来源被拒绝
+
+### 改进
+- Docker 容器安装失败时自动降级到 GitHub 克隆审查（`gh repo clone` → `git clone`）
+- 移除不再使用的 `cleanup_sandbox` 函数和 `SANDBOX_NAME` 变量
+
+---
+
 ## [5.6.2] - 2026-03-15
 
 ### 修复
