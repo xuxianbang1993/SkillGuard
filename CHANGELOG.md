@@ -4,6 +4,17 @@
 
 ---
 
+## [5.6.1] - 2026-03-15
+
+### 修复
+- **跨平台 SHA256 校验失败**（CRITICAL）：Windows Git 默认 `core.autocrlf=true` 将 LF 转为 CRLF，导致文件哈希改变、完整性校验失败，用户无法安装
+- **行尾归一化**：`compute_sha256()` 和 `generate-checksums.sh` 现在先 `tr -d '\r'` 再计算哈希，确保 Windows/Linux/macOS 一致
+- **添加 `.gitattributes`**：强制 `*.sh` 和 `checksums.sha256` 使用 LF 行尾（`eol=lf`），从 Git 层面杜绝行尾问题
+- **仓库行尾混乱**：归一化所有 `.sh` 文件为 LF（此前 `uninstall.sh` 为 CRLF，其余为 LF）
+- **Python 检测误判**（HIGH）：Windows 的 `python3` 可能是 Microsoft Store 重定向 stub（exit code 49），所有脚本改为先 `--version` 验证再使用，覆盖 6 个文件 8 处调用
+
+---
+
 ## [5.6] - 2026-03-15
 
 ### 安全修复

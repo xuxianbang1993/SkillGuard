@@ -36,13 +36,14 @@ SG_TMPDIR="${TMPDIR:-/tmp}"
 APPROVED_DIR="$SCRIPT_DIR/.approved"
 mkdir -p "$APPROVED_DIR" 2>/dev/null || true
 
-# ── 跨平台 sha256 计算函数 ──────────────────────────────────
+# ── 跨平台 sha256 计算函数（自动归一化行尾为 LF）─────────────
 compute_sha256() {
     local file="$1"
+    # 归一化 CRLF → LF 后计算哈希，确保跨平台一致性
     if command -v sha256sum &>/dev/null; then
-        sha256sum "$file" 2>/dev/null | cut -d' ' -f1
+        tr -d '\r' < "$file" 2>/dev/null | sha256sum | cut -d' ' -f1
     elif command -v shasum &>/dev/null; then
-        shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1
+        tr -d '\r' < "$file" 2>/dev/null | shasum -a 256 | cut -d' ' -f1
     else
         echo ""
     fi

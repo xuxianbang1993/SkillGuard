@@ -18,6 +18,15 @@
 
 set -uo pipefail
 
+# ── 确定 Python 命令（验证真实可用，排除 Windows Store stub）──
+SG_PYTHON=""
+for _candidate in python3 python; do
+    if command -v "$_candidate" &>/dev/null && "$_candidate" --version &>/dev/null; then
+        SG_PYTHON="$_candidate"
+        break
+    fi
+done
+
 SKILL_SOURCE="${1:-}"
 SKILL_NAME="${2:-unknown}"
 
@@ -337,7 +346,7 @@ if grep --help 2>&1 | grep -q '\-P'; then
     check_pattern "零宽字符（隐形文字）" \
         -rlP "[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{200E}\x{200F}\x{2060}]"
 else
-    ZWC_RESULT=$(python3 -c "
+    ZWC_RESULT=$($SG_PYTHON -c "
 import sys, os
 for root, dirs, files in os.walk(sys.argv[1]):
     for f in files:
@@ -373,7 +382,7 @@ check_pattern "已知外传域名（高危）" \
 # ── 新增检测模式（Phase 1 加固）──────────────────────────────
 
 # [C-06] Unicode Tag 字符（ASCII Smuggling）
-UTAG_RESULT=$(python3 -c "
+UTAG_RESULT=$($SG_PYTHON -c "
 import sys, os
 for root, dirs, files in os.walk(sys.argv[1]):
     for f in files:
@@ -396,7 +405,7 @@ else
 fi
 
 # [M-10] BiDi 双向控制字符（Trojan Source）
-BIDI_RESULT=$(python3 -c "
+BIDI_RESULT=$($SG_PYTHON -c "
 import sys, os
 bidi_chars = set('\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u200E\u200F\u061C')
 for root, dirs, files in os.walk(sys.argv[1]):
@@ -465,7 +474,7 @@ check_pattern "反向 Shell 模式（高危）" \
 # ── Phase 3 新增检测模式 ──────────────────────────────────────
 
 # [P3-01] Homoglyph / Confusable 字符检测（视觉欺骗）
-HOMO_RESULT=$(python3 -c "
+HOMO_RESULT=$($SG_PYTHON -c "
 import sys, os, unicodedata
 
 # 高风险 Homoglyph 映射表（Cyrillic/Greek/Math 常用于伪装 ASCII）

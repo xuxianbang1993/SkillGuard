@@ -96,9 +96,14 @@ for fixture in "$FIXTURES_DIR"/*.md; do
     # 多层编码混淆
     grep -rniE '(atob|btoa|base64|hex|charCodeAt|fromCharCode|encodeURI|decodeURI).{0,80}(atob|btoa|base64|hex|charCodeAt|fromCharCode|eval|exec)' "$fixture" &>/dev/null && ISSUES=$((ISSUES+1))
 
-    # Python 检测（零宽/Unicode Tag/BiDi/Homoglyph）需要 python3
-    if command -v python3 &>/dev/null; then
-        PYCHECK=$(python3 -c "
+    # Python 检测（零宽/Unicode Tag/BiDi/Homoglyph）
+    # 确定 Python 命令（验证真实可用，排除 Windows Store stub）
+    _PY=""
+    for _c in python3 python; do
+        if command -v "$_c" &>/dev/null && "$_c" --version &>/dev/null; then _PY="$_c"; break; fi
+    done
+    if [ -n "$_PY" ]; then
+        PYCHECK=$($_PY -c "
 import sys
 text = open(sys.argv[1], 'r', encoding='utf-8', errors='ignore').read()
 issues = 0

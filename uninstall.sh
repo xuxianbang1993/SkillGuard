@@ -40,13 +40,14 @@ SETTINGS_FILE="$HOME/.claude/settings.json"
 if [ ! -f "$SETTINGS_FILE" ]; then
     log_warn "settings.json 不存在，跳过"
 else
-    # 确定 Python 命令
+    # 确定 Python 命令（验证真实可用，排除 Windows Store stub）
     PY_CMD=""
-    if command -v python3 &>/dev/null; then
-        PY_CMD="python3"
-    elif command -v python &>/dev/null; then
-        PY_CMD="python"
-    fi
+    for candidate in python3 python; do
+        if command -v "$candidate" &>/dev/null && "$candidate" --version &>/dev/null; then
+            PY_CMD="$candidate"
+            break
+        fi
+    done
 
     if [ -n "$PY_CMD" ]; then
         $PY_CMD -c "

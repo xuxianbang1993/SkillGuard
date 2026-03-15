@@ -1,0 +1,5 @@
+# SkillGuard: Force LF line endings for all scripts
+# Critical for SHA256 integrity verification across platforms
+*.sh text eol=lf
+checksums.sha256 text eol=lf
+Dockerfile* text eol=lf

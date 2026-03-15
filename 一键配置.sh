@@ -231,16 +231,20 @@ else
     ENV_SCORE=$((ENV_SCORE+1))  # 非 Windows 不需要火绒
 fi
 
-# ── 2.7 Python3 ──────────────────────────────────────────────
+# ── 2.7 Python ───────────────────────────────────────────────
 ENV_TOTAL=$((ENV_TOTAL+1))
 PYTHON_OK=0
 PYTHON_CMD=""
-if command -v python3 &>/dev/null; then
-    PYTHON_CMD="python3"
-elif command -v python &>/dev/null; then
-    # Windows Git Bash 下通常只有 python（不是 python3）
-    PYTHON_CMD="python"
-fi
+# 注意：Windows 的 python3 可能是 Microsoft Store 重定向 stub（AppInstallerPythonRedirector.exe）
+# 该 stub 会返回 exit code 49 而不是执行 Python，必须用 --version 验证真实可用性
+for candidate in python3 python; do
+    if command -v "$candidate" &>/dev/null; then
+        if "$candidate" --version &>/dev/null; then
+            PYTHON_CMD="$candidate"
+            break
+        fi
+    fi
+done
 
 if [ -n "$PYTHON_CMD" ]; then
     PY_VER=$($PYTHON_CMD --version 2>&1 || echo "unknown")
@@ -317,13 +321,14 @@ mkdir -p "$CLAUDE_DIR" 2>/dev/null || true
 GATE_CMD="bash $SG_PATH/skillguard-gate.sh"
 WRITE_CMD="bash $SG_PATH/skillguard-write.sh"
 
-# 确定 Python 命令（兼容 Windows Git Bash）
+# 确定 Python 命令（验证真实可用，排除 Windows Store stub）
 PY_CMD=""
-if command -v python3 &>/dev/null; then
-    PY_CMD="python3"
-elif command -v python &>/dev/null; then
-    PY_CMD="python"
-fi
+for candidate in python3 python; do
+    if command -v "$candidate" &>/dev/null && "$candidate" --version &>/dev/null; then
+        PY_CMD="$candidate"
+        break
+    fi
+done
 
 if [ -n "$PY_CMD" ]; then
     $PY_CMD -c "

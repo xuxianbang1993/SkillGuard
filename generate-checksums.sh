@@ -28,7 +28,8 @@ echo ""
 for file in "${CORE_FILES[@]}"; do
     filepath="$SCRIPT_DIR/$file"
     if [ -f "$filepath" ]; then
-        hash=$(sha256sum "$filepath" | cut -d' ' -f1)
+        # 归一化 CRLF → LF 后计算哈希，确保跨平台一致性
+        hash=$(tr -d '\r' < "$filepath" | sha256sum | cut -d' ' -f1)
         echo "$hash  $file" >> "$MANIFEST"
         echo "  ✅ $file → ${hash:0:16}..."
     else
