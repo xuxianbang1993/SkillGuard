@@ -4,6 +4,29 @@
 
 ---
 
+## [5.6.4] - 2026-03-15
+
+### 架构重设计
+- **Step 2 文件获取重写**（CRITICAL 性能）：移除 Docker 容器内 `npm install -g @anthropic-ai/claude-code` + `npx skills add` 流程（耗时 3-8 分钟），改为直接 `git clone --depth=1`（3-5 秒）。技能本质是文本文件（.md/.js/.py），获取文件无需安装任何 npm 包
+- **Layer 3 动态测试重写**（CRITICAL 性能）：移除容器内第二次 `npm install claude-code`（又 3-5 分钟），改为挂载已克隆文件做行为检测。总审查时间从 10-20 分钟降至 20-60 秒
+- **Docker Volume 文件隔离**（安全增强）：火绒扫描后，文件从主机临时目录转移到 Docker Volume，主机文件立即删除。Layer 1-3 全部通过 Volume 只读挂载执行，文件在主机暴露时间从全程降至最多 15 秒
+- **Layer 1 容器化执行**：24+ 安全检测项从主机 grep/python 迁移到 Docker 容器内 Python 脚本统一执行，消除主机依赖
+
+### 修复
+- **Unicode Tag 误报**（HIGH）：U+FE00-FE0F（Variation Selectors，emoji 正常字符如 1️⃣ 2️⃣）被错误判定为 ASCII Smuggling 攻击。修复为仅检测 U+E0000-E007F（Tags block）
+- **.git/ 二进制误报**（HIGH）：所有 Python 扫描遍历 `.git/objects/pack/*.pack` 等二进制文件，导致 BiDi、Homoglyph 等检测误报。修复为 Layer 0 前删除 `.git/` 目录，所有 os.walk 排除 `.git`
+- **gate.sh WARN 分支语法错误**：在非函数上下文使用 `local` 关键字导致 bash 警告
+
+### 新增
+- **白名单功能**：新增 `whitelist.txt` 永久白名单文件，匹配的来源直接放行，不触发审查。支持完整 URL 和 owner/repo 格式，支持 `#` 注释
+- **120 秒总超时**：gate.sh 调用 audit.sh 加 `timeout 120`，防止审查无限等待。超时后输出一键白名单命令
+- **每步 60 秒超时**：火绒扫描、Layer 2、Layer 3 各加 `timeout 60`，单步卡死不影响整体
+- **进度计时器**：所有日志输出带 `[MM:SS]` 时间戳，hook 完成后可查看完整审查进度
+- **异常退出清理**：`trap EXIT` 确保 Docker Volume 和临时目录在脚本异常退出时也被清理
+- **Hook 超时降级**：`一键配置.sh` 和 `update.sh` 中 PreToolUse hook timeout 从 300000ms（5 分钟）降至 120000ms（2 分钟），与 gate.sh 总超时对齐
+
+---
+
 ## [5.6.3] - 2026-03-15
 
 ### 修复

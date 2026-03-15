@@ -36,6 +36,9 @@ SG_TMPDIR="${TMPDIR:-/tmp}"
 APPROVED_DIR="$SCRIPT_DIR/.approved"
 mkdir -p "$APPROVED_DIR" 2>/dev/null || true
 
+# 白名单文件（永久免审查）
+WHITELIST_FILE="$SCRIPT_DIR/whitelist.txt"
+
 # ── 跨平台 sha256 计算函数（自动归一化行尾为 LF）─────────────
 compute_sha256() {
     local file="$1"
@@ -399,6 +402,35 @@ if [ -z "$SKILL_SOURCE" ]; then
     exit 2
 fi
 
+# ── 白名单检查（永久免审查）────────────────────────────────────
+is_whitelisted() {
+    local source="$1"
+    if [ ! -f "$WHITELIST_FILE" ]; then
+        return 1
+    fi
+    # 逐行匹配（忽略空行和 # 注释行）
+    while IFS= read -r line; do
+        line=$(echo "$line" | sed 's/#.*//' | tr -d '[:space:]')
+        [ -z "$line" ] && continue
+        if [ "$source" = "$line" ]; then
+            return 0
+        fi
+        # 也匹配去掉 https://github.com/ 前缀的格式
+        local norm_source norm_line
+        norm_source=$(echo "$source" | sed 's|https\?://github\.com/||' | sed 's|\.git$||')
+        norm_line=$(echo "$line" | sed 's|https\?://github\.com/||' | sed 's|\.git$||')
+        if [ "$norm_source" = "$norm_line" ]; then
+            return 0
+        fi
+    done < "$WHITELIST_FILE"
+    return 1
+}
+
+if is_whitelisted "$SKILL_SOURCE"; then
+    echo "[SkillGuard] 白名单命中，免审查放行：$SKILL_SOURCE" >&2
+    exit 0
+fi
+
 # ── 快速通道判断（官方技能跳过审查）───────────────────────────
 is_trusted_source() {
     local src="$1"
@@ -435,9 +467,16 @@ fi
 echo "[SkillGuard] 拦截到技能安装请求：$SKILL_SOURCE" >&2
 echo "[SkillGuard] 非官方来源，启动隔离审查流水线..." >&2
 
-# 调用审查主控脚本
-bash "$AUDIT_SCRIPT" "$SKILL_SOURCE" "$SKILL_NAME"
+# 调用审查主控脚本（300 秒总超时）
+timeout 300 bash "$AUDIT_SCRIPT" "$SKILL_SOURCE" "$SKILL_NAME"
 AUDIT_EXIT=$?
+
+# timeout 退出码 124 表示超时
+if [ $AUDIT_EXIT -eq 124 ]; then
+    echo "[SkillGuard] 审查超时（300 秒），已自动终止。" >&2
+    echo "[SkillGuard] 如确认安全，可加入白名单：echo '$SKILL_SOURCE' >> '$WHITELIST_FILE'" >&2
+    exit 2
+fi
 
 # 根据审查结果决定是否放行
 case $AUDIT_EXIT in
@@ -452,10 +491,8 @@ case $AUDIT_EXIT in
     3)
         # WARN：有警告，等待用户决定
         echo "[SkillGuard] 审查有警告，等待用户确认。" >&2
-        echo "[SkillGuard] 用户确认「释放」后，Claude 重新执行安装命令即可。" >&2
-        local approval_hash
-        approval_hash=$(echo -n "$SKILL_SOURCE" | compute_sha256 /dev/stdin 2>/dev/null || echo -n "$SKILL_SOURCE" | sha256sum 2>/dev/null | cut -d' ' -f1)
-        echo "[SkillGuard] 手动颁发凭证：echo \$(date +%s) > \"$APPROVED_DIR/$approval_hash\"" >&2
+        echo "[SkillGuard] 如确认安全，加入白名单：echo '$SKILL_SOURCE' >> '$WHITELIST_FILE'" >&2
+        echo "[SkillGuard] 加入白名单后重新执行安装命令即可。" >&2
         exit 2
         ;;
     *)
