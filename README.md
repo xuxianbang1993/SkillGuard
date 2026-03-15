@@ -430,7 +430,7 @@ sha256sum -c checksums-release.sha256
 
 ---
 
-## 7. CLAUDE.md 规则摘要（更新至 v5.3）
+## 7. CLAUDE.md 规则摘要（更新至 v5.4）
 
 以下条目可直接复制到 `CLAUDE.md`：
 
