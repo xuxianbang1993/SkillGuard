@@ -365,7 +365,7 @@ sha256sum -c /tmp/skill-baseline.txt
 
 ---
 
-## 6. 自保护体系（v5.3 新增）
+## 6. 自保护体系（v5.3+ 新增）
 
 SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制。
 
@@ -373,7 +373,7 @@ SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│           SkillGuard v5.3 自保护体系（6 层）              │
+│           SkillGuard v5.4 自保护体系（6 层）              │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │  第 1 层：Hook 自保护                                     │
@@ -408,7 +408,7 @@ SkillGuard 不仅保护用户系统，还保护自己不被篡改或恶意复制
 
 ```bash
 # 方法 1：SLSA 出处验证（最强，推荐）
-gh attestation verify skillguard-v5.3.tar.gz -o xuxianbang1993
+gh attestation verify skillguard-v5.4.tar.gz -o xuxianbang1993
 
 # 方法 2：SHA256 校验（Release 下载后）
 sha256sum -c checksums-release.sha256
@@ -449,6 +449,7 @@ sha256sum -c checksums-release.sha256
 - **红队验证**：`bash run-tests.sh` 运行 10 个测试样本验证 Layer 1 检测能力
 - **ClawHub 政策**：允许安装，但必须有 GitHub 源码可验证，且走完四层审查
 - **ClawHub 独占（无 GitHub 源）**：禁止安装
+- **自动更新检查**：每次会话首次触发时从 GitHub 检测新版本（6h 一次，3s 超时，离线不影响），提示 `bash update.sh` 更新
 - **首选安装源**：`npx skills@latest add anthropics/skills@<skill>` 或已验证 GitHub 源
 - **完整方案参考**：`D:\Xuxianbang-Skills\SkillGuard\README.md`
 ```
